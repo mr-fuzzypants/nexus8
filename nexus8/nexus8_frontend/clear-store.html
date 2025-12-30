@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Clear Kanban Store</title>
+</head>
+<body>
+    <h1>Clear Kanban Store localStorage</h1>
+    <button onclick="clearStore()">Clear Store</button>
+    <div id="result"></div>
+    
+    <script>
+        function clearStore() {
+            localStorage.removeItem('kanban-store');
+            document.getElementById('result').innerHTML = 'Store cleared! You can close this tab and refresh your app.';
+        }
+        
+        // Show current store
+        const current = localStorage.getItem('kanban-store');
+        if (current) {
+            console.log('Current store:', JSON.parse(current));
+        }
+    </script>
+</body>
+</html>

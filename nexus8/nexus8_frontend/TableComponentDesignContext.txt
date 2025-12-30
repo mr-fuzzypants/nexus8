@@ -1,0 +1,42 @@
+i want to create a performant react table using the mantine UI library with the following features: * progressive, streamed rendering with large data sets * virtual scroling support * column managment/hiding * multi-grouping support (tree table) with drag-and-drop functionality * multi-sort * themes (dark and light themes). Tables need to be schema/data driven. It needs to be reusable, very performant for large numbers of rows (> 1000). 
+Put code in a nexus8_frontend folder. Should resemble kendo grid.
+
+⚙️ Feature Breakdown
+Feature	Implementation Strategy
+1. Progressive / Streamed Rendering	Use an API that returns JSON in chunks or NDJSON; parse and append rows as they arrive.
+2. Virtual Scrolling	Use TanStack Virtual or React Virtuoso for windowed rendering of large tables.
+3. Column Management / Hiding	Controlled column state in TanStack Table with Mantine <Menu> for toggles.
+4. Multi-grouping (Tree Table)	TanStack Table’s getGroupedRowModel or hierarchical flattening logic.
+5.Drag and Drop (for groups/columns)	Use @dnd-kit to reorder columns or drag group headers.
+6. Multi-sort	Built-in support in TanStack Table.
+7. Themes (Dark/Light)	Use Mantine’s theme system with a toggle.
+8. Columns must be resizable
+9. Must be a shareable/reusable Component
+10. Must be model based with the ability to dyanmically create schemas and data
+11. Must have a test data harness
+
+🧱 Overall Architecture
+1. Layer Responsibility	
+    Use Mantine for  UI & Theming, Styling, layout, and theme switching	
+
+2. Table Core
+   Used TanStack Table (React Table v8) for	Data structure, sorting, grouping, column visibility	
+
+3. Virtualization
+  Use TanStack Virtual for Efficient large dataset rendering
+ or React Virtuoso
+
+4. @dnd-kit/core Use Drag & Drop Group and reorder rows/columns	
+
+⚙️ Feature Breakdown
+Feature	Implementation Strategy
+1 Progressive / Streamed Rendering	Use an API that returns JSON in chunks or NDJSON; parse and append rows as they arrive.
+2 Virtual Scrolling	Use TanStack Virtual or React Virtuoso for windowed rendering of large tables.
+3 Column Management / Hiding	Controlled column state in TanStack Table with Mantine <Menu> for toggles.
+4. Multi-grouping (Tree Table)	TanStack Table’s getGroupedRowModel or hierarchical flattening logic.
+5. Drag and Drop (for groups/columns)	Use @dnd-kit to reorder columns or drag group headers.
+6. Multi-sort	Built-in support in TanStack Table.
+7. Themes (Dark/Light)	Use Mantine’s theme system with a toggle.
+
+This will be used with nexus8 backend ultimately, however I will need test data to test with. 
+
