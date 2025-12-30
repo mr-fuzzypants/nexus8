@@ -113,6 +113,13 @@ export const ContextMenuConfig = z.object({
 
 export type ContextMenuConfig = z.infer<typeof ContextMenuConfig>;
 
+// Column Reordering Configuration
+export const ColumnReorderingConfig = z.object({
+  enabled: z.boolean().default(true),
+});
+
+export type ColumnReorderingConfig = z.infer<typeof ColumnReorderingConfig>;
+
 // TreeGrid Schema
 export const TreeGridSchema = z.object({
   version: z.string().default(TREEGRID_SCHEMA_VERSION),
@@ -124,6 +131,7 @@ export const TreeGridSchema = z.object({
   
   // Feature configurations
   grouping: GroupingConfig,
+  columnReordering: ColumnReorderingConfig.optional(),
   export: ExportConfig,
   virtualization: VirtualizationConfig,
   selection: SelectionConfig,

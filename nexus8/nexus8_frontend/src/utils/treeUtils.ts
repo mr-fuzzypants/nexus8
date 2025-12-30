@@ -73,7 +73,7 @@ export function getVisibleRows(
   expandedIds: Set<string>
 ): TreeNode[] {
   const visibleRows: TreeNode[] = [];
-  const nodeMap = new Map(nodes.map(node => [node.id, node]));
+  // const nodeMap = new Map(nodes.map(node => [node.id, node]));
   const childrenMap = new Map<string | null, TreeNode[]>();
 
   // Build children map - preserving order from nodes array

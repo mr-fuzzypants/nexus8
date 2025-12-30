@@ -1,5 +1,8 @@
 // Schema exports
 export * from './cardSchema';
+export * from './treeGridSchema';
+export * from './treeTableSchema';
+
 export * from './kanbanSchema';
 export * from './panelSchema';
 export * from './navigationSchema';
