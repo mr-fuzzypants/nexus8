@@ -10,11 +10,12 @@ import { KanbanCard as KanbanCardType } from '../../schema';
 
 interface KanbanColumnProps {
   status: StatusDefinition;
+  isAggregate?: boolean;
   onAddChild?: (card: KanbanCardType) => void;
   onCardClick?: (card: KanbanCardType) => void;
 }
 
-export const KanbanColumn = React.memo(({ status, onAddChild, onCardClick }: KanbanColumnProps) => {
+export const KanbanColumn = React.memo(({ status, isAggregate, onAddChild, onCardClick }: KanbanColumnProps) => {
   const { currentPath, layout } = useKanbanStore(
     (state) => ({
       currentPath: state.ui.currentPath,
@@ -26,7 +27,9 @@ export const KanbanColumn = React.memo(({ status, onAddChild, onCardClick }: Kan
   const actions = useKanbanStore((state) => state.actions);
 
   const cards = useKanbanStore(
-    (state) => state.getCardsByStatus(currentPath, status.id),
+    (state) => isAggregate 
+      ? state.getCardsByAggregateStatus(currentPath, status.id)
+      : state.getCardsByStatus(currentPath, status.id),
     shallow
   );
 
@@ -40,18 +43,37 @@ export const KanbanColumn = React.memo(({ status, onAddChild, onCardClick }: Kan
 
     return dropTargetForElements({
       element,
-      getData: () => ({ type: 'column', statusId: status.id }),
+      getData: () => ({ 
+        type: 'column', 
+        statusId: status.id,
+        isAggregate 
+      }),
       onDragEnter: () => setIsOver(true),
       onDragLeave: () => setIsOver(false),
       onDrop: () => setIsOver(false),
     });
-  }, [status.id]);
+  }, [status.id, isAggregate]);
 
   const handleAddCard = () => {
+    let targetStatusId = status.id;
+    
+    if (isAggregate) {
+       // Find first status for this aggregate
+       const firstStatus = useKanbanStore.getState().kanbanSchema.statuses
+         .sort((a, b) => a.order - b.order)
+         .find(s => s.aggregateStatus === status.id);
+         
+       if (firstStatus) {
+         targetStatusId = firstStatus.id;
+       } else {
+         return; 
+       }
+    }
+
     actions.createCard({
       title: 'New Card',
       description: '',
-      status: status.id,
+      status: targetStatusId,
       path: currentPath,
       metadata: {},
     });

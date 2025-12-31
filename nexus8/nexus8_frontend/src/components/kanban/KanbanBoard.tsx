@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { monitorForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
 import { extractClosestEdge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge';
-import { Box, Flex, Button, Tooltip } from '@mantine/core';
+import { Box, Flex, Button, Tooltip, SegmentedControl } from '@mantine/core';
 import { IconSettings } from '@tabler/icons-react';
 import { shallow } from 'zustand/shallow';
 import { useKanbanStore } from '../../state';
@@ -9,7 +9,7 @@ import { KanbanColumn } from './KanbanColumn';
 import { AddChildCardModal } from './AddChildCardModal';
 import { ColumnManagerModal } from './ColumnManagerModal';
 import { CardEditorModal } from './CardEditorModal';
-import { KanbanCard } from '../../schema';
+import { KanbanCard, defaultAggregateStatuses } from '../../schema';
 
 interface KanbanBoardProps {
   onCardClick?: (card: KanbanCard) => void;
@@ -36,6 +36,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   const [childModalOpen, setChildModalOpen] = useState(false);
   const [columnManagerOpen, setColumnManagerOpen] = useState(false);
   const [parentCard, setParentCard] = useState<KanbanCard | null>(null);
+  const [viewMode, setViewMode] = useState<'detailed' | 'aggregate'>('detailed');
 
   const handleAddChild = (card: KanbanCard) => {
     setParentCard(card);
@@ -58,8 +59,21 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           // Dropped on a column
           if (destinationData.type === 'column') {
             const statusId = destinationData.statusId as string;
-            if (sourceCard.status !== statusId) {
-              actions.moveCard(cardId, statusId);
+            const isAggregate = destinationData.isAggregate as boolean;
+
+            if (isAggregate) {
+               // Find the first status that maps to this aggregate status
+               const firstStatus = useKanbanStore.getState().kanbanSchema.statuses
+                 .sort((a, b) => a.order - b.order)
+                 .find(s => s.aggregateStatus === statusId);
+                 
+               if (firstStatus && sourceCard.status !== firstStatus.id) {
+                 actions.moveCard(cardId, firstStatus.id);
+               }
+            } else {
+              if (sourceCard.status !== statusId) {
+                actions.moveCard(cardId, statusId);
+              }
             }
           }
           
@@ -98,6 +112,16 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   return (
     <>
       <Box h="100%" style={{ overflowX: 'auto' }}>
+        <Box p="md" pb={0}>
+           <SegmentedControl
+             value={viewMode}
+             onChange={(value) => setViewMode(value as 'detailed' | 'aggregate')}
+             data={[
+               { label: 'Detailed View', value: 'detailed' },
+               { label: 'Aggregate View', value: 'aggregate' },
+             ]}
+           />
+        </Box>
         <Flex 
           gap="md" 
           h="100%" 
@@ -109,17 +133,43 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
             transformOrigin: 'top left'
           }}
         >
-          {kanbanSchema.statuses
-            .slice()
-            .sort((a, b) => a.order - b.order)
-            .map((status) => (
-            <KanbanColumn 
-              key={status.id} 
-              status={status} 
-              onAddChild={handleAddChild}
-              onCardClick={onCardClick}
-            />
-          ))}
+          {viewMode === 'detailed' ? (
+            kanbanSchema.statuses
+              .slice()
+              .sort((a, b) => a.order - b.order)
+              .map((status) => (
+              <KanbanColumn 
+                key={status.id} 
+                status={status} 
+                onAddChild={handleAddChild}
+                onCardClick={onCardClick}
+              />
+            ))
+          ) : (
+            defaultAggregateStatuses.map((agg, index) => (
+              <KanbanColumn
+                key={agg.id}
+                status={{
+                  id: agg.id,
+                  label: agg.label,
+                  color: agg.color,
+                  description: agg.description,
+                  order: index,
+                  aggregateStatus: agg.id as any,
+                  allowDrop: true,
+                  allowDrag: false,
+                  isInitial: false,
+                  isFinal: false,
+                  collapsible: true,
+                  defaultCollapsed: false,
+                  limit: 0
+                } as any}
+                isAggregate={true}
+                onAddChild={handleAddChild}
+                onCardClick={onCardClick}
+              />
+            ))
+          )}
 
           <Tooltip label="Manage Columns">
             <Button

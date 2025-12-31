@@ -102,6 +102,7 @@ export interface KanbanState {
   // Computed getters
   getCardsAtPath: (path: string) => KanbanCard[];
   getCardsByStatus: (path: string, status: string) => KanbanCard[];
+  getCardsByAggregateStatus: (path: string, aggregateStatus: string) => KanbanCard[];
   getFilteredCards: (path: string) => KanbanCard[];
   getCardChildren: (cardId: string) => KanbanCard[];
   getCardParent: (cardId: string) => KanbanCard | undefined;
@@ -272,6 +273,27 @@ export const useKanbanStore = create<KanbanState>()(
           return cardIds
             .map(id => state.cards[id])
             .filter(Boolean);
+        },
+
+        getCardsByAggregateStatus: (path: string, aggregateStatus: string) => {
+          const state = get();
+          // Find all statuses that map to this aggregate status, sorted by order
+          const matchingStatuses = state.kanbanSchema.statuses
+            .filter(s => s.aggregateStatus === aggregateStatus)
+            .sort((a, b) => a.order - b.order)
+            .map(s => s.id);
+            
+          // Collect all cards from these statuses
+          const allCards: KanbanCard[] = [];
+          matchingStatuses.forEach(statusId => {
+             const cardIds = state.cardOrder[path]?.[statusId] || [];
+             cardIds.forEach(id => {
+               const card = state.cards[id];
+               if (card) allCards.push(card);
+             });
+          });
+          
+          return allCards;
         },
         
         getFilteredCards: (path: string) => {
