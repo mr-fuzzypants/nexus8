@@ -1,17 +1,7 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { 
-  DndContext, 
-  DragOverlay, 
-  useSensor, 
-  useSensors, 
-  PointerSensor, 
-  DragEndEvent, 
-  DragStartEvent, 
-  closestCenter,
-  pointerWithin,
-  CollisionDetection
-} from '@dnd-kit/core';
+import { monitorForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { extractClosestEdge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge';
 import { Box, ScrollArea, Text, useMantineTheme, Badge } from '@mantine/core';
 import { useTreeGridStore } from '../../state/useTreeGridStore';
 import { TreeTableSchema } from '../../schema/treeTableSchema';
@@ -36,7 +26,6 @@ export const TreeTable: React.FC<TreeTableProps> = ({
   const theme = useMantineTheme();
   const parentRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
-  const [activeDragItem, setActiveDragItem] = useState<{ id: string; title: string } | null>(null);
   
   const { 
     setSchema, 
@@ -50,42 +39,54 @@ export const TreeTable: React.FC<TreeTableProps> = ({
     reorderColumns
   } = useTreeGridStore();
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: {
-        distance: 8,
-      },
-    })
-  );
+  useEffect(() => {
+    return monitorForElements({
+      onDrop({ source, location }) {
+        const destination = location.current.dropTargets[0];
+        if (!destination) return;
 
-  const handleDragStart = (event: DragStartEvent) => {
-    const { active } = event;
-    setActiveDragItem({
-      id: active.id as string,
-      title: active.data.current?.title || '',
+        const sourceData = source.data;
+        const destinationData = destination.data;
+
+        // Handle grouping
+        if (destinationData.type === 'group-panel' && sourceData.type === 'column') {
+          const field = sourceData.field as string;
+          if (field) {
+            addGroup(field);
+          }
+          return;
+        }
+
+        // Handle column reordering
+        if (sourceData.type === 'column' && destinationData.type === 'column') {
+          const sourceId = sourceData.id as string;
+          const destinationId = destinationData.id as string;
+
+          if (sourceId === destinationId) return;
+
+          const oldIndex = columnOrder.indexOf(sourceId);
+          const newIndex = columnOrder.indexOf(destinationId);
+          
+          if (oldIndex !== -1 && newIndex !== -1) {
+            // Adjust index based on edge
+            const edge = extractClosestEdge(destinationData);
+            let finalIndex = newIndex;
+            
+            if (edge === 'right') {
+                finalIndex += 1;
+            }
+            
+            // If moving forward, we need to account for the item being removed
+            if (oldIndex < finalIndex) {
+                finalIndex -= 1;
+            }
+
+            reorderColumns(oldIndex, finalIndex);
+          }
+        }
+      }
     });
-  };
-
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    setActiveDragItem(null);
-    
-    if (!over) return;
-
-    if (over.id === 'group-panel') {
-      const field = active.data.current?.field;
-      if (field) {
-        addGroup(field);
-      }
-    } else if (active.id !== over.id) {
-      const oldIndex = columnOrder.indexOf(active.id as string);
-      const newIndex = columnOrder.indexOf(over.id as string);
-      
-      if (oldIndex !== -1 && newIndex !== -1) {
-        reorderColumns(oldIndex, newIndex);
-      }
-    }
-  };
+  }, [columnOrder, addGroup, reorderColumns]);
 
   // Initialize store
   useEffect(() => {
@@ -124,26 +125,7 @@ export const TreeTable: React.FC<TreeTableProps> = ({
     return acc + (columnWidths[colId] || 100);
   }, 0);
 
-  const customCollisionDetection: CollisionDetection = useCallback((args) => {
-    // First, check if we are over the group panel using pointerWithin
-    const pointerCollisions = pointerWithin(args);
-    const groupPanel = pointerCollisions.find(c => c.id === 'group-panel');
-    
-    if (groupPanel) {
-      return [groupPanel];
-    }
-
-    // Fallback to closestCenter for column reordering
-    return closestCenter(args);
-  }, []);
-
   return (
-    <DndContext 
-      sensors={sensors} 
-      collisionDetection={customCollisionDetection}
-      onDragStart={handleDragStart} 
-      onDragEnd={handleDragEnd}
-    >
       <Box 
         className={className} 
         style={{ 
@@ -207,14 +189,5 @@ export const TreeTable: React.FC<TreeTableProps> = ({
           </Text>
         </Box>
       </Box>
-      
-      <DragOverlay>
-        {activeDragItem ? (
-          <Badge size="lg" variant="filled" style={{ cursor: 'grabbing' }}>
-            {activeDragItem.title}
-          </Badge>
-        ) : null}
-      </DragOverlay>
-    </DndContext>
   );
 };

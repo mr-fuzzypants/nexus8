@@ -1,6 +1,7 @@
-import React from 'react';
-import { useSortable } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
+import React, { useRef, useState, useEffect } from 'react';
+import { draggable, dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine';
+import { attachClosestEdge, extractClosestEdge, Edge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge';
 import { Box, Group, Text, useMantineTheme } from '@mantine/core';
 import { IconChevronDown, IconChevronUp, IconSelector, IconGripVertical } from '@tabler/icons-react';
 import { useTreeGridStore } from '../../state/useTreeGridStore';
@@ -21,19 +22,42 @@ export const TreeTableHeaderCell: React.FC<TreeTableHeaderCellProps> = ({ colId,
   } = useTreeGridStore();
 
   const colDef = schema.columns.find(c => c.id === colId);
-  
-  const { 
-    attributes, 
-    listeners, 
-    setNodeRef, 
-    transform, 
-    transition, 
-    isDragging 
-  } = useSortable({
-    id: colId,
-    data: { field: colDef?.field, type: 'column', title: colDef?.header },
-    disabled: !colDef,
-  });
+  const ref = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [closestEdge, setClosestEdge] = useState<Edge | null>(null);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || !colDef) return;
+
+    return combine(
+      draggable({
+        element,
+        getInitialData: () => ({ type: 'column', id: colId, field: colDef.field, title: colDef.header }),
+        onDragStart: () => setIsDragging(true),
+        onDrop: () => setIsDragging(false),
+      }),
+      dropTargetForElements({
+        element,
+        getData: ({ input }) => attachClosestEdge(
+          { type: 'column', id: colId },
+          { element, input, allowedEdges: ['left', 'right'] }
+        ),
+        onDragEnter: ({ self }) => {
+            setClosestEdge(extractClosestEdge(self.data));
+        },
+        onDrag: ({ self }) => {
+            setClosestEdge(extractClosestEdge(self.data));
+        },
+        onDragLeave: () => {
+            setClosestEdge(null);
+        },
+        onDrop: () => {
+            setClosestEdge(null);
+        },
+      })
+    );
+  }, [colId, colDef]);
 
   if (!colDef) return null;
 
@@ -58,7 +82,7 @@ export const TreeTableHeaderCell: React.FC<TreeTableHeaderCellProps> = ({ colId,
 
   return (
     <Box
-      ref={setNodeRef}
+      ref={ref}
       style={{
         width: `${width}px`,
         height: '100%',
@@ -66,14 +90,15 @@ export const TreeTableHeaderCell: React.FC<TreeTableHeaderCellProps> = ({ colId,
         alignItems: 'center',
         padding: '0 8px',
         borderRight: `1px solid ${theme.colors.gray[3]}`,
+        borderLeft: closestEdge === 'left' ? `2px solid ${theme.colors.blue[5]}` : undefined,
+        borderRight: closestEdge === 'right' ? `2px solid ${theme.colors.blue[5]}` : `1px solid ${theme.colors.gray[3]}`,
         position: isPinned ? 'sticky' : 'relative',
         left: isPinned ? `${currentLeft}px` : undefined,
         zIndex: isPinned ? 3 : 1,
         userSelect: 'none',
         backgroundColor: theme.colors.gray[0],
         opacity: isDragging ? 0.5 : 1,
-        transform: CSS.Translate.toString(transform),
-        transition,
+        transition: 'background-color 0.2s',
       }}
     >
       <Group 
@@ -84,7 +109,7 @@ export const TreeTableHeaderCell: React.FC<TreeTableHeaderCellProps> = ({ colId,
         }}
         wrap="nowrap"
       >
-        <div {...attributes} {...listeners} style={{ display: 'flex', alignItems: 'center', cursor: 'grab' }}>
+        <div style={{ display: 'flex', alignItems: 'center', cursor: 'grab' }}>
            <IconGripVertical size={14} color={theme.colors.gray[5]} />
         </div>
 

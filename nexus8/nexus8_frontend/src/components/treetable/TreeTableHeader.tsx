@@ -1,5 +1,4 @@
 import React from 'react';
-import { SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable';
 import { useTreeGridStore } from '../../state/useTreeGridStore';
 import { TreeTableHeaderCell } from './TreeTableHeaderCell';
 
@@ -21,7 +20,7 @@ export const TreeTableHeader: React.FC<TreeTableHeaderProps> = ({ totalWidth }) 
 
   const visibleColumns = columnOrder.filter(colId => columnVisibility[colId] !== false);
 
-  const content = (
+  return (
     <div style={{ 
       display: 'flex', 
       width: `${totalWidth}px`,
@@ -49,14 +48,4 @@ export const TreeTableHeader: React.FC<TreeTableHeaderProps> = ({ totalWidth }) 
       })}
     </div>
   );
-
-  if (reorderEnabled) {
-    return (
-      <SortableContext items={visibleColumns} strategy={horizontalListSortingStrategy}>
-        {content}
-      </SortableContext>
-    );
-  }
-
-  return content;
 };

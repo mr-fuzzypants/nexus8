@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
 import {
   Card,
   Text,
@@ -15,10 +15,15 @@ import {
   Indicator,
 } from '@mantine/core';
 import {
-  useSortable,
-  defaultAnimateLayoutChanges,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
+  draggable,
+  dropTargetForElements,
+} from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine';
+import {
+  attachClosestEdge,
+  Edge,
+  extractClosestEdge,
+} from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge';
 import {
   IconGripVertical,
   IconEdit,
@@ -35,7 +40,6 @@ import {
 } from '@tabler/icons-react';
 import type { KanbanCard as KanbanCardType } from '../../schema';
 import { useResponsive, responsiveUtils, getResponsiveProps } from '../../utils';
-import { useKanbanStore } from '../../state';
 import { AsyncImage } from '../AsyncImage';
 
 interface KanbanCardProps {
@@ -48,7 +52,6 @@ interface KanbanCardProps {
   onAddChild?: (parentCard: KanbanCardType) => void;
   onNavigateToChildren?: (parentCard: KanbanCardType) => void;
   isSelected?: boolean;
-  isDragging?: boolean;
   style?: React.CSSProperties;
   className?: string;
 }
@@ -95,41 +98,48 @@ const KanbanCardComponent: React.FC<KanbanCardProps> = ({
   onAddChild,
   onNavigateToChildren,
   isSelected = false,
-  isDragging = false,
   style,
   className,
 }) => {
   // Hooks
   const screenSize = useResponsive();
   const [menuOpened, setMenuOpened] = useState(false);
-  
-  // Removed cardScale subscription - scaling is handled at board level via CSS transform
-  
-  // Drag and drop
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging: isSortableDragging,
-  } = useSortable({
-    id: card.id,
-    disabled: isDragging,
-    data: {
-      type: 'card',
-      cardId: card.id, // Optimize: Only pass ID, not full object
-    },
-    // Optimize: Skip layout animations for better performance with many cards
-    animateLayoutChanges: (args) => 
-      args.isSorting || args.wasDragging ? defaultAnimateLayoutChanges(args) : true,
-  });
-  
-  // Transform for dragging
-  const dragStyle = {
-    transform: CSS.Transform.toString(transform),
-    transition: isSortableDragging ? undefined : transition, // Optimize: Remove transition when dragging
-  };
+  const elementRef = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const [closestEdge, setClosestEdge] = useState<Edge | null>(null);
+
+  useEffect(() => {
+    const element = elementRef.current;
+    if (!element) return;
+
+    return combine(
+      draggable({
+        element,
+        getInitialData: () => ({ type: 'card', cardId: card.id, card }),
+        onDragStart: () => setDragging(true),
+        onDrop: () => setDragging(false),
+      }),
+      dropTargetForElements({
+        element,
+        getData: ({ input }) => {
+          return attachClosestEdge(
+            { type: 'card', cardId: card.id, card },
+            { element, input, allowedEdges: ['top', 'bottom'] }
+          );
+        },
+        onDragEnter: ({ self }) => {
+          const edge = extractClosestEdge(self.data);
+          setClosestEdge(edge);
+        },
+        onDrag: ({ self }) => {
+          const edge = extractClosestEdge(self.data);
+          setClosestEdge(edge);
+        },
+        onDragLeave: () => setClosestEdge(null),
+        onDrop: () => setClosestEdge(null),
+      })
+    );
+  }, [card]);
   
   // Get responsive props
   const responsiveProps = useMemo(() => 
@@ -202,37 +212,31 @@ const KanbanCardComponent: React.FC<KanbanCardProps> = ({
   
   return (
     <Card
-      ref={setNodeRef}
+      ref={elementRef}
       className={className}
       style={{
-        ...dragStyle,
         ...style,
-        cursor: isDragging ? 'grabbing' : 'grab',
-        opacity: isSortableDragging || isDragging ? 0.6 : 1,
+        cursor: dragging ? 'grabbing' : 'grab',
+        opacity: dragging ? 0.4 : 1,
         border: isSelected ? '2px solid var(--mantine-color-blue-5)' : undefined,
+        borderTop: closestEdge === 'top' ? '2px solid var(--mantine-color-blue-5)' : undefined,
+        borderBottom: closestEdge === 'bottom' ? '2px solid var(--mantine-color-blue-5)' : undefined,
         boxShadow: isSelected 
           ? 'var(--mantine-shadow-md)' 
-          : (isDragging || isSortableDragging)
+          : dragging
           ? 'var(--mantine-shadow-xl)' 
           : undefined,
-        zIndex: isSortableDragging || isDragging ? 1000 : 1,
-        transition: 'none',
-        willChange: isSortableDragging || isDragging ? 'transform, opacity' : 'auto',
       }}
       padding={responsiveProps.padding}
       radius="md"
       withBorder
       onClick={handleClick}
-      {...attributes}
-      {...listeners}
     >
       <Stack gap={spacing}>
         {/* Header with drag handle and menu */}
         <Group justify="space-between" gap="xs">
           <Tooltip label="Drag to reorder">
             <Box
-              {...attributes}
-              {...listeners}
               style={{ 
                 cursor: 'grab',
                 padding: '4px',
@@ -507,7 +511,9 @@ export const KanbanCard = React.memo(KanbanCardComponent, (prevProps, nextProps)
   if (prevProps.card.status !== nextProps.card.status) return false;
   if (prevProps.card.updatedAt !== nextProps.card.updatedAt) return false;
   if (prevProps.isSelected !== nextProps.isSelected) return false;
-  if (prevProps.isDragging !== nextProps.isDragging) return false;
+  
+  // Check style changes (crucial for virtualization)
+  if (JSON.stringify(prevProps.style) !== JSON.stringify(nextProps.style)) return false;
   
   // Props haven't changed, skip re-render
   return true;

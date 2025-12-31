@@ -1,5 +1,5 @@
-import React from 'react';
-import { useDroppable } from '@dnd-kit/core';
+import React, { useRef, useState, useEffect } from 'react';
+import { dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
 import { Box, Text, Group, Badge, ActionIcon, useMantineTheme } from '@mantine/core';
 import { IconX } from '@tabler/icons-react';
 import { useTreeGridStore } from '../../state/useTreeGridStore';
@@ -7,13 +7,25 @@ import { useTreeGridStore } from '../../state/useTreeGridStore';
 export const TreeTableGroupPanel: React.FC = () => {
   const theme = useMantineTheme();
   const { groupBy, removeGroup, schema } = useTreeGridStore();
-  const { setNodeRef, isOver } = useDroppable({
-    id: 'group-panel',
-  });
+  const ref = useRef<HTMLDivElement>(null);
+  const [isOver, setIsOver] = useState(false);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+
+    return dropTargetForElements({
+      element,
+      getData: () => ({ type: 'group-panel' }),
+      onDragEnter: () => setIsOver(true),
+      onDragLeave: () => setIsOver(false),
+      onDrop: () => setIsOver(false),
+    });
+  }, []);
 
   return (
     <Box
-      ref={setNodeRef}
+      ref={ref}
       p="xs"
       style={{
         borderBottom: `1px solid ${theme.colors.gray[3]}`,

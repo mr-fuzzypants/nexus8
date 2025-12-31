@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { 
   Modal, 
   TextInput, 
@@ -17,6 +17,9 @@ import {
   Box,
   Tooltip,
 } from '@mantine/core';
+import { draggable, dropTargetForElements, monitorForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine';
+import { attachClosestEdge, extractClosestEdge, Edge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge';
 import { IconPlus, IconTrash, IconGripVertical, IconEdit, IconSettings, IconArrowRight } from '@tabler/icons-react';
 import { useKanbanStore } from '../../state';
 import type { StatusDefinition, AggregateStatusType } from '../../schema';
@@ -27,11 +30,188 @@ interface ColumnManagerProps {
   onClose: () => void;
 }
 
+const DraggableColumnItem = ({ 
+  status, 
+  index, 
+  handleEditColumn, 
+  handleDeleteColumn, 
+  kanbanSchema 
+}: { 
+  status: StatusDefinition, 
+  index: number, 
+  handleEditColumn: (s: StatusDefinition) => void, 
+  handleDeleteColumn: (id: string) => void,
+  kanbanSchema: any
+}) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const [closestEdge, setClosestEdge] = useState<Edge | null>(null);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+
+    return combine(
+      draggable({
+        element,
+        getInitialData: () => ({ type: 'column-manager-item', index, id: status.id }),
+      }),
+      dropTargetForElements({
+        element,
+        getData: ({ input }) => attachClosestEdge(
+          { type: 'column-manager-item', index, id: status.id },
+          { element, input, allowedEdges: ['top', 'bottom'] }
+        ),
+        onDragEnter: ({ self }) => {
+          setClosestEdge(extractClosestEdge(self.data));
+        },
+        onDrag: ({ self }) => {
+          setClosestEdge(extractClosestEdge(self.data));
+        },
+        onDragLeave: () => {
+          setClosestEdge(null);
+        },
+        onDrop: () => {
+          setClosestEdge(null);
+        },
+      })
+    );
+  }, [status.id, index]);
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <Card p="md" withBorder style={{ 
+          borderTop: closestEdge === 'top' ? '2px solid var(--mantine-color-blue-filled)' : undefined,
+          borderBottom: closestEdge === 'bottom' ? '2px solid var(--mantine-color-blue-filled)' : undefined,
+        }}>
+        <Group justify="space-between">
+          <Group gap="sm">
+            <ActionIcon variant="subtle" size="sm" style={{ cursor: 'grab' }}>
+              <IconGripVertical size={16} />
+            </ActionIcon>
+            
+            <Badge color={status.color} variant="light">
+              {status.label}
+            </Badge>
+            
+            {status.aggregateStatus && (
+              <Group gap={4}>
+                <IconArrowRight size={12} />
+                <Badge 
+                  color={defaultAggregateStatuses.find(a => a.id === status.aggregateStatus)?.color} 
+                  variant="outline"
+                  size="sm"
+                >
+                  {defaultAggregateStatuses.find(a => a.id === status.aggregateStatus)?.label}
+                </Badge>
+              </Group>
+            )}
+            
+            <Text size="sm" c="dimmed">
+              Order: {status.order}
+            </Text>
+            
+            {status.maxCards && (
+              <Badge size="xs" color="orange">
+                WIP: {status.maxCards}
+              </Badge>
+            )}                    {status.isInitial && (
+              <Badge variant="outline" color="blue" size="sm">
+                Initial
+              </Badge>
+            )}
+            
+            {status.isFinal && (
+              <Badge variant="outline" color="green" size="sm">
+                Final
+              </Badge>
+            )}
+          </Group>
+          
+          <Group gap="xs">
+            <Tooltip label="Edit Column">
+              <ActionIcon 
+                variant="subtle"
+                onClick={() => handleEditColumn(status)}
+                size="sm"
+              >
+                <IconEdit size={16} />
+              </ActionIcon>
+            </Tooltip>
+            
+            <Tooltip label="Delete Column">
+              <ActionIcon 
+                color="red" 
+                variant="subtle"
+                onClick={() => handleDeleteColumn(status.id)}
+                size="sm"
+                disabled={kanbanSchema.statuses.length <= 1}
+              >
+                <IconTrash size={16} />
+              </ActionIcon>
+            </Tooltip>
+          </Group>
+        </Group>
+        
+        {status.description && (
+          <Text size="sm" c="dimmed" mt="xs">
+            {status.description}
+          </Text>
+        )}
+      </Card>
+    </div>
+  );
+};
+
 export const ColumnManagerModal: React.FC<ColumnManagerProps> = ({ opened, onClose }) => {
   const { kanbanSchema, actions } = useKanbanStore();
   const [editingColumn, setEditingColumn] = useState<StatusDefinition | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   
+  useEffect(() => {
+    return monitorForElements({
+      onDrop({ source, location }) {
+        const destination = location.current.dropTargets[0];
+        if (!destination) return;
+        
+        const sourceData = source.data;
+        const destinationData = destination.data;
+
+        if (sourceData.type !== 'column-manager-item' || destinationData.type !== 'column-manager-item') return;
+
+        const sourceIndex = sourceData.index as number;
+        const destinationIndex = destinationData.index as number;
+        
+        if (sourceIndex === destinationIndex) return;
+
+        const edge = extractClosestEdge(destinationData);
+        
+        const newStatuses = [...kanbanSchema.statuses];
+        const [movedStatus] = newStatuses.splice(sourceIndex, 1);
+        
+        let targetIndex = destinationIndex;
+        if (edge === 'bottom') {
+            targetIndex += 1;
+        }
+        
+        if (sourceIndex < targetIndex) {
+            targetIndex -= 1;
+        }
+        
+        newStatuses.splice(targetIndex, 0, movedStatus);
+        
+        const updatedStatuses = newStatuses.map((s, i) => ({
+          ...s,
+          order: i + 1
+        }));
+        
+        actions.updateKanbanSchema({
+          ...kanbanSchema,
+          statuses: updatedStatuses
+        });
+      }
+    });
+  }, [kanbanSchema, actions]);
+
   const [formData, setFormData] = useState({
     id: '',
     label: '',
@@ -76,7 +256,7 @@ export const ColumnManagerModal: React.FC<ColumnManagerProps> = ({ opened, onClo
       description: formData.description || undefined,
       color: formData.color || undefined,
       icon: formData.icon || undefined,
-      order: editingColumn ? editingColumn.order : Math.max(...kanbanSchema.statuses.map(s => s.order), 0) + 1,
+      order: formData.order,
       aggregateStatus: formData.aggregateStatus,
       allowDrop: formData.allowDrop,
       allowDrag: formData.allowDrag,
@@ -236,83 +416,15 @@ export const ColumnManagerModal: React.FC<ColumnManagerProps> = ({ opened, onClo
           <Divider />
 
           <Stack gap="sm">
-            {kanbanSchema.statuses.map((status) => (
-              <Card key={status.id} p="md" withBorder>
-                <Group justify="space-between">
-                  <Group gap="sm">
-                    <ActionIcon variant="subtle" size="sm" style={{ cursor: 'grab' }}>
-                      <IconGripVertical size={16} />
-                    </ActionIcon>
-                    
-                    <Badge color={status.color} variant="light">
-                      {status.label}
-                    </Badge>
-                    
-                    {status.aggregateStatus && (
-                      <Group gap={4}>
-                        <IconArrowRight size={12} />
-                        <Badge 
-                          color={defaultAggregateStatuses.find(a => a.id === status.aggregateStatus)?.color} 
-                          variant="outline"
-                          size="sm"
-                        >
-                          {defaultAggregateStatuses.find(a => a.id === status.aggregateStatus)?.label}
-                        </Badge>
-                      </Group>
-                    )}
-                    
-                    <Text size="sm" c="dimmed">
-                      Order: {status.order}
-                    </Text>
-                    
-                    {status.maxCards && (
-                      <Badge size="xs" color="orange">
-                        WIP: {status.maxCards}
-                      </Badge>
-                    )}                    {status.isInitial && (
-                      <Badge variant="outline" color="blue" size="sm">
-                        Initial
-                      </Badge>
-                    )}
-                    
-                    {status.isFinal && (
-                      <Badge variant="outline" color="green" size="sm">
-                        Final
-                      </Badge>
-                    )}
-                  </Group>
-                  
-                  <Group gap="xs">
-                    <Tooltip label="Edit Column">
-                      <ActionIcon 
-                        variant="subtle"
-                        onClick={() => handleEditColumn(status)}
-                        size="sm"
-                      >
-                        <IconEdit size={16} />
-                      </ActionIcon>
-                    </Tooltip>
-                    
-                    <Tooltip label="Delete Column">
-                      <ActionIcon 
-                        color="red" 
-                        variant="subtle"
-                        onClick={() => handleDeleteColumn(status.id)}
-                        size="sm"
-                        disabled={kanbanSchema.statuses.length <= 1}
-                      >
-                        <IconTrash size={16} />
-                      </ActionIcon>
-                    </Tooltip>
-                  </Group>
-                </Group>
-                
-                {status.description && (
-                  <Text size="sm" c="dimmed" mt="xs">
-                    {status.description}
-                  </Text>
-                )}
-              </Card>
+            {kanbanSchema.statuses.map((status, index) => (
+              <DraggableColumnItem
+                key={status.id}
+                status={status}
+                index={index}
+                handleEditColumn={handleEditColumn}
+                handleDeleteColumn={handleDeleteColumn}
+                kanbanSchema={kanbanSchema}
+              />
             ))}
           </Stack>
         </Stack>

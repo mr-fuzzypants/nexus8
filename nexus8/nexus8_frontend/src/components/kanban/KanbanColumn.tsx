@@ -1,405 +1,230 @@
-import React, { useState, useMemo, useCallback } from 'react';
-import {
-  Box,
-  Card,
-  Text,
-  Badge,
-  ActionIcon,
-  Group,
-  Collapse,
-  Button,
-  Stack,
-  Tooltip,
-} from '@mantine/core';
-import {
-  IconChevronDown,
-  IconChevronUp,
-  IconPlus,
-  IconDotsVertical,
-} from '@tabler/icons-react';
-import { useDroppable } from '@dnd-kit/core';
-import { useSortable, SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import { KanbanCard } from './KanbanCard';
+import React, { useRef, useState, useEffect } from 'react';
+import { Paper, Text, Group, Badge, Box, ActionIcon, Menu } from '@mantine/core';
+import { dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { IconDots, IconPlus, IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
+import { shallow } from 'zustand/shallow';
+import { StatusDefinition } from '../../schema/kanbanSchema';
+import { useKanbanStore } from '../../state';
 import { CardVirtualList } from './CardVirtualList';
-import { useResponsive } from '../../utils';
-import type { KanbanCard as KanbanCardType } from '../../schema';
-
-// Status definition interface (matching schema)
-interface StatusDefinition {
-  id: string;
-  label: string;
-  order: number;
-  color?: string;
-  description?: string;
-  allowDrop?: boolean;
-  allowDrag?: boolean;
-  isInitial?: boolean;
-  isFinal?: boolean;
-  showCardCount?: boolean;
-  collapsible?: boolean;
-  defaultCollapsed?: boolean;
-  wipLimit?: number;
-  maxCards?: number;
-  mobileOrder?: number;
-}
+import { KanbanCard as KanbanCardType } from '../../schema';
 
 interface KanbanColumnProps {
   status: StatusDefinition;
-  cards: KanbanCardType[];
-  selectedCardIds?: string[];
+  onAddChild?: (card: KanbanCardType) => void;
   onCardClick?: (card: KanbanCardType) => void;
-  onCardEdit?: (card: KanbanCardType) => void;
-  onCardDuplicate?: (card: KanbanCardType) => void;
-  onCardDelete?: (card: KanbanCardType) => void;
-  onCardView?: (card: KanbanCardType) => void;
-  onCardAddChild?: (parentCard: KanbanCardType) => void;
-  onCardNavigateToChildren?: (parentCard: KanbanCardType) => void;
-  onNewCard?: (statusId: string) => void;
-  onColumnSettingsClick?: (columnId: string) => void;
-  enableVirtualization?: boolean;
-  itemSize?: number;
-  maxHeight?: number;
-  className?: string;
-  style?: React.CSSProperties;
 }
 
-interface DropZoneProps {
-  statusId: string;
-  statusLabel: string;
-  statusColor: string;
-  isCollapsed: boolean;
-  enableVirtualization: boolean;
-  cardsLength: number;
-  maxHeight: number;
-  responsiveProps: { spacing: string | number };
-  onNewCard?: () => void;
-  children: React.ReactNode;
-}
+export const KanbanColumn = React.memo(({ status, onAddChild, onCardClick }: KanbanColumnProps) => {
+  const { currentPath, layout } = useKanbanStore(
+    (state) => ({
+      currentPath: state.ui.currentPath,
+      layout: state.kanbanSchema.layout,
+    }),
+    shallow
+  );
 
-const KanbanColumnDropZone: React.FC<DropZoneProps> = React.memo(({
-  statusId,
-  statusLabel,
-  statusColor,
-  isCollapsed,
-  enableVirtualization,
-  cardsLength,
-  maxHeight,
-  responsiveProps,
-  onNewCard,
-  children
-}) => {
-  const { setNodeRef, isOver } = useDroppable({
-    id: `column-${statusId}`,
-    data: { type: 'column', statusId },
-  });
+  const actions = useKanbanStore((state) => state.actions);
 
-  return (
-    <Collapse in={!isCollapsed}>
-      <Box 
-        ref={setNodeRef}
-        p={responsiveProps.spacing} 
-        style={{ 
-          minHeight: 100,
-          ...(enableVirtualization && cardsLength > 10 ? {} : {
-            maxHeight: maxHeight,
-            overflowY: 'auto',
-            overflowX: 'hidden',
-          }),
-          backgroundColor: isOver ? 'var(--mantine-color-blue-0)' : undefined,
-          borderRadius: isOver ? 'var(--mantine-radius-md)' : undefined,
-          border: isOver ? '2px dashed var(--mantine-color-blue-4)' : '2px dashed transparent',
-          transition: 'background-color 0.2s ease, border-color 0.2s ease',
+  const cards = useKanbanStore(
+    (state) => state.getCardsByStatus(currentPath, status.id),
+    shallow
+  );
+
+  const ref = useRef<HTMLDivElement>(null);
+  const [isOver, setIsOver] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(status.defaultCollapsed && status.collapsible);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+
+    return dropTargetForElements({
+      element,
+      getData: () => ({ type: 'column', statusId: status.id }),
+      onDragEnter: () => setIsOver(true),
+      onDragLeave: () => setIsOver(false),
+      onDrop: () => setIsOver(false),
+    });
+  }, [status.id]);
+
+  const handleAddCard = () => {
+    actions.createCard({
+      title: 'New Card',
+      description: '',
+      status: status.id,
+      path: currentPath,
+      metadata: {},
+    });
+  };
+
+  const handleEdit = (card: KanbanCardType) => actions.openCardEditor(card.id);
+  
+  const handleClick = (card: KanbanCardType) => {
+    if (onCardClick) {
+      onCardClick(card);
+    } else {
+      actions.selectCard(card.id);
+    }
+  };
+  
+  const handleDuplicate = (card: KanbanCardType) => actions.duplicateCard(card.id);
+  const handleDelete = (card: KanbanCardType) => actions.deleteCard(card.id);
+  const handleView = (card: KanbanCardType) => {
+    actions.selectCard(card.id);
+    actions.setInfoPanelOpen(true);
+  };
+  
+  const handleAddChild = (card: KanbanCardType) => {
+    if (onAddChild) {
+      onAddChild(card);
+    } else {
+      console.log('Add child to', card.id);
+    }
+  };
+
+  const handleNavigateToChildren = (card: KanbanCardType) => {
+     const childPath = `${card.path}/${card.id}`;
+     actions.navigateToPath(childPath);
+  };
+
+  // Get layout settings from schema
+  const columnLayout = layout || {
+    type: 'scrollable',
+    minWidth: 280,
+    maxWidth: 400,
+    mobileMinWidth: 250,
+    spacing: 'md',
+    breakpoints: {
+      mobile: 768,
+      tablet: 1024,
+      desktop: 1200,
+    },
+    mobileLayout: 'horizontal-scroll',
+  };
+  const minWidth = columnLayout.minWidth || 280;
+  const maxWidth = columnLayout.maxWidth || 400;
+
+  if (isCollapsed) {
+    return (
+      <Paper
+        ref={ref}
+        h="100%"
+        p={0}
+        bg={isOver ? 'gray.2' : 'gray.0'}
+        withBorder
+        style={{
+          width: 60,
+          minWidth: 60,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          transition: 'all 0.2s',
+          overflow: 'hidden'
         }}
       >
-        {cardsLength === 0 ? (
-          /* Empty State */
-          <Stack align="center" py="xl" gap="sm">
-            <Text size="sm" c="dimmed" ta="center">
-              {isOver ? "Drop card here" : `No cards in ${statusLabel}`}
-            </Text>
-            {onNewCard && !isOver && (
-              <Button
-                variant="light"
-                color={statusColor}
-                size="sm"
-                leftSection={<IconPlus size={16} />}
-                onClick={onNewCard}
-              >
-                Add first card
-              </Button>
-            )}
-          </Stack>
-        ) : (
-          children
-        )}
-      </Box>
-    </Collapse>
-  );
-});
+        {status.color && <Box h={4} w="100%" bg={status.color} />}
+        
+        <Box p="xs" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', flex: 1 }}>
+          <ActionIcon 
+            variant="subtle" 
+            size="sm" 
+            onClick={() => setIsCollapsed(false)}
+            mb="sm"
+          >
+            <IconChevronRight size={16} />
+          </ActionIcon>
 
-export const KanbanColumn: React.FC<KanbanColumnProps> = ({
-  status,
-  cards,
-  selectedCardIds = [],
-  onCardClick,
-  onCardEdit,
-  onCardDuplicate,
-  onCardDelete,
-  onCardView,
-  onCardAddChild,
-  onCardNavigateToChildren,
-  onNewCard,
-  onColumnSettingsClick,
-  enableVirtualization = true,
-  itemSize = 160,
-  maxHeight = 600,
-  className,
-  style,
-}) => {
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  const screenSize = useResponsive();
+          <Badge size="xs" variant="light" color="gray" mb="sm">
+            {cards.length}
+          </Badge>
 
-  // Optimize: Memoize card IDs for SortableContext to prevent unnecessary updates
-  const cardIds = useMemo(() => cards.map(c => c.id), [cards]);
-
-  // Drag and drop setup for column reordering
-  const {
-    setNodeRef: setSortableRef,
-    attributes: sortableAttributes,
-    listeners: sortableListeners,
-  } = useSortable({
-    id: status.id,
-    data: { type: 'column', status },
-  });
-
-  // Responsive props
-  const responsiveProps = useMemo(() => ({
-    spacing: screenSize.isMobile ? 'xs' : 'sm',
-    cardSpacing: screenSize.isMobile ? 'xs' : 'sm',
-  }), [screenSize]);
-
-  // Check for WIP limit violations
-  const wipViolation = useMemo(() => {
-    return status.wipLimit && cards.length > status.wipLimit;
-  }, [status.wipLimit, cards.length]);
-
-  // Event handlers
-  const handleToggleCollapse = useCallback(() => {
-    setIsCollapsed(!isCollapsed);
-  }, [isCollapsed]);
-
-  const handleNewCard = useCallback(() => {
-    onNewCard?.(status.id);
-  }, [onNewCard, status.id]);
-
-  const handleCardClick = useCallback((card: KanbanCardType) => {
-    onCardClick?.(card);
-  }, [onCardClick]);
-
-  const handleCardEdit = useCallback((card: KanbanCardType) => {
-    onCardEdit?.(card);
-  }, [onCardEdit]);
-
-  const handleCardDuplicate = useCallback((card: KanbanCardType) => {
-    onCardDuplicate?.(card);
-  }, [onCardDuplicate]);
-
-  const handleCardDelete = useCallback((card: KanbanCardType) => {
-    onCardDelete?.(card);
-  }, [onCardDelete]);
-
-  // Virtualization settings
-  const virtualizationHeight = useMemo(() => {
-    return screenSize.isMobile ? Math.min(maxHeight, 300) : maxHeight;
-  }, [screenSize.isMobile, maxHeight]);
-
-  // Status color for theming
-  const statusColor = status.color || 'blue';
+          <Box style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', overflow: 'hidden' }}>
+             <Text 
+               fw={700} 
+               size="sm" 
+               truncate
+               c={status.color}
+               style={{ 
+                 width: '100%',
+                 textAlign: 'center'
+               }}
+             >
+               {status.label.substring(0, 3)}
+             </Text>
+          </Box>
+        </Box>
+      </Paper>
+    );
+  }
 
   return (
-    <Card
-      ref={setSortableRef}
-      className={className}
-      style={{
-        minWidth: screenSize.isMobile ? 280 : 320,
-        maxWidth: screenSize.isMobile ? 320 : 380,
-        borderColor: wipViolation 
-          ? 'var(--mantine-color-red-5)'
-          : undefined,
-        borderWidth: wipViolation ? 2 : 1,
-        ...style,
-      }}
-      padding={0}
-      radius="md"
+    <Paper
+      ref={ref}
+      w={300} // Default width, but constrained by min/max
+      h="100%"
+      p={0}
+      bg={isOver ? 'gray.2' : 'gray.1'}
       withBorder
+      style={{ 
+        display: 'flex', 
+        flexDirection: 'column',
+        minWidth: minWidth,
+        maxWidth: maxWidth,
+        flex: columnLayout.type === 'flexible' ? 1 : '0 0 auto',
+        transition: 'background-color 0.2s',
+        overflow: 'hidden'
+      }}
     >
-      <Stack gap={0}>
-        {/* Column Header */}
-        <Box
-          p={responsiveProps.spacing}
-          style={{
-            borderBottom: '1px solid var(--mantine-color-gray-3)',
-            backgroundColor: `var(--mantine-color-${statusColor}-0)`,
-            borderRadius: 'var(--mantine-radius-md) var(--mantine-radius-md) 0 0',
-          }}
-          {...sortableAttributes}
-          {...sortableListeners}
-        >
-          <Group justify="space-between" gap="xs">
-            {/* Title and count */}
-            <Group gap="xs" style={{ flex: 1 }}>
-              {status.collapsible && (
-                <ActionIcon
-                  variant="subtle"
-                  size="sm"
-                  onClick={handleToggleCollapse}
-                >
-                  {isCollapsed ? (
-                    <IconChevronDown size={16} />
-                  ) : (
-                    <IconChevronUp size={16} />
-                  )}
-                </ActionIcon>
-              )}
-              
-              <Text
-                size={screenSize.isMobile ? 'sm' : 'md'}
-                fw={600}
-                style={{ color: `var(--mantine-color-${statusColor}-7)` }}
-                lineClamp={1}
-              >
-                {status.label}
-              </Text>
-              
-              {status.showCardCount && (
-                <Badge
-                  variant="light"
-                  color={wipViolation ? 'red' : statusColor}
-                  size="xs"
-                >
-                  {cards.length}
-                  {status.wipLimit && ` / ${status.wipLimit}`}
-                </Badge>
-              )}
-            </Group>
-            
-            {/* Actions */}
-            <Group gap="xs">
-              {onNewCard && (
-                <Tooltip label="Add card">
-                  <ActionIcon
-                    variant="light"
-                    color={statusColor}
-                    size="sm"
-                    onClick={handleNewCard}
-                  >
-                    <IconPlus size={16} />
-                  </ActionIcon>
-                </Tooltip>
-              )}
-              
-              {onColumnSettingsClick && (
-                <Tooltip label="Column settings">
-                  <ActionIcon
-                    variant="subtle"
-                    size="sm"
-                    onClick={() => onColumnSettingsClick(status.id)}
-                  >
-                    <IconDotsVertical size={16} />
-                  </ActionIcon>
-                </Tooltip>
-              )}
-            </Group>
+      {status.color && <Box h={4} w="100%" bg={status.color} />}
+      
+      <Box p="sm" style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+        <Group justify="space-between" mb="sm">
+          <Group gap="xs">
+            <Text fw={700} size="sm" c={status.color}>{status.label}</Text>
+            {status.showCardCount && (
+              <Badge size="sm" variant="light" color="gray">
+                {cards.length}
+              </Badge>
+            )}
           </Group>
-
-          {/* WIP Limit Warning */}
-          {wipViolation && (
-            <Box mt="xs">
-              <Text size="xs" c="red">
-                WIP limit exceeded ({cards.length}/{status.wipLimit})
-              </Text>
-            </Box>
-          )}
+          <Group gap={4}>
+            {status.collapsible && (
+              <ActionIcon variant="subtle" size="sm" onClick={() => setIsCollapsed(true)}>
+                <IconChevronLeft size={16} />
+              </ActionIcon>
+            )}
+            <ActionIcon variant="subtle" size="sm" onClick={handleAddCard}>
+              <IconPlus size={16} />
+            </ActionIcon>
+            <Menu position="bottom-end">
+              <Menu.Target>
+                <ActionIcon variant="subtle" size="sm">
+                  <IconDots size={16} />
+                </ActionIcon>
+              </Menu.Target>
+              <Menu.Dropdown>
+                {status.collapsible && (
+                  <Menu.Item onClick={() => setIsCollapsed(true)}>Collapse</Menu.Item>
+                )}
+                <Menu.Item color="red">Clear All</Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
+          </Group>
+        </Group>
+        
+        <Box style={{ flex: 1, overflow: 'hidden' }}>
+          <CardVirtualList 
+            cards={cards} 
+            onEdit={handleEdit}
+            onClick={handleClick}
+            onDuplicate={handleDuplicate}
+            onDelete={handleDelete}
+            onView={handleView}
+            onAddChild={handleAddChild}
+            onNavigateToChildren={handleNavigateToChildren}
+          />
         </Box>
-
-        {/* Cards Container */}
-        <KanbanColumnDropZone
-          statusId={status.id}
-          statusLabel={status.label}
-          statusColor={statusColor}
-          isCollapsed={isCollapsed}
-          enableVirtualization={enableVirtualization}
-          cardsLength={cards.length}
-          maxHeight={maxHeight}
-          responsiveProps={responsiveProps}
-          onNewCard={handleNewCard}
-        >
-          {enableVirtualization && cards.length > 10 ? (
-            /* Virtualized List */
-            <CardVirtualList
-              cards={cards}
-              selectedCardIds={selectedCardIds}
-              onCardClick={handleCardClick}
-              onCardEdit={handleCardEdit}
-              onCardDuplicate={handleCardDuplicate}
-              onCardDelete={handleCardDelete}
-              onCardView={onCardView}
-              onCardAddChild={onCardAddChild}
-              onCardNavigateToChildren={onCardNavigateToChildren}
-              itemSize={itemSize}
-              height={virtualizationHeight}
-            />
-          ) : (
-            /* Regular List */
-            <SortableContext
-              items={cardIds}
-              strategy={verticalListSortingStrategy}
-            >
-              <Stack gap="md">
-                {cards.map((card) => (
-                  <Box 
-                    key={card.id}
-                  >
-                    <KanbanCard
-                      card={card}
-                      onClick={handleCardClick}
-                      onEdit={handleCardEdit}
-                      onDuplicate={handleCardDuplicate}
-                      onDelete={handleCardDelete}
-                      onView={onCardView}
-                      onAddChild={onCardAddChild}
-                      onNavigateToChildren={onCardNavigateToChildren}
-                      isSelected={selectedCardIds.includes(card.id)}
-                    />
-                  </Box>
-                ))}
-              </Stack>
-            </SortableContext>
-          )}
-        </KanbanColumnDropZone>
-      </Stack>
-    </Card>
+      </Box>
+    </Paper>
   );
-};
-
-// Memoize to prevent re-renders when props haven't changed
-const KanbanColumnMemoized = React.memo(KanbanColumn, (prevProps, nextProps) => {
-  // Return true to SKIP re-render, false to RE-RENDER
-  if (prevProps.status.id !== nextProps.status.id) return false;
-  if (prevProps.cards.length !== nextProps.cards.length) return false;
-  
-  const prevSelected = prevProps.selectedCardIds || [];
-  const nextSelected = nextProps.selectedCardIds || [];
-  if (prevSelected.length !== nextSelected.length) return false;
-  
-  // Check if card IDs changed (order matters)
-  if (prevProps.cards.some((card, i) => card.id !== nextProps.cards[i]?.id)) return false;
-  
-  // Check if any card's updatedAt changed (indicates content changed)
-  if (prevProps.cards.some((card, i) => card.updatedAt !== nextProps.cards[i]?.updatedAt)) return false;
-  
-  // Props haven't changed, skip re-render
-  return true;
 });
-
-export default KanbanColumnMemoized;
