@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useUndoRedoStore } from '../state/useUndoRedo';
-import { useKanbanStore } from '../state/useKanbanStore';
+import { useDataStore } from '../state/useDataStore';
 import type { UndoableAction } from '../state/useUndoRedo';
 import type { KanbanCard } from '../schema';
 
@@ -38,13 +38,13 @@ export const useUndoIntegration = () => {
  * Apply an undo action (reverse the changes)
  */
 const applyUndoAction = (action: UndoableAction) => {
-  const kanbanStore = useKanbanStore.getState();
+  const dataStore = useDataStore.getState();
   const diff = action.diff;
 
   // Handle created cards - remove them on undo
   if (diff.created && diff.created.length > 0) {
     diff.created.forEach((created) => {
-      kanbanStore.actions.deleteCard(created.id);
+      dataStore.actions.deleteCard(created.id);
     });
   }
 
@@ -52,11 +52,11 @@ const applyUndoAction = (action: UndoableAction) => {
   if (diff.deleted && diff.deleted.length > 0) {
     diff.deleted.forEach((deleted) => {
       // Restore the deleted card
-      useKanbanStore.setState((draft) => {
+      useDataStore.setState((draft) => {
         draft.cards[deleted.id] = deleted.data;
         
         // Restore to card order
-        const path = deleted.data.path;
+        const path = deleted.data.path || 'root';
         const status = deleted.data.status;
         
         if (!draft.cardOrder[path]) {
@@ -85,7 +85,7 @@ const applyUndoAction = (action: UndoableAction) => {
   // Handle card changes - reverse them
   if (diff.cardChanges) {
     Object.entries(diff.cardChanges).forEach(([cardId, changes]) => {
-      const card = kanbanStore.cards[cardId];
+      const card = dataStore.cards[cardId];
       if (card) {
         const updates: Partial<KanbanCard> = {};
         
@@ -94,7 +94,7 @@ const applyUndoAction = (action: UndoableAction) => {
           updates[change.field as keyof KanbanCard] = change.oldValue;
         });
         
-        kanbanStore.actions.updateCard(cardId, updates);
+        dataStore.actions.updateCard(cardId, updates);
       }
     });
   }
@@ -103,7 +103,7 @@ const applyUndoAction = (action: UndoableAction) => {
   if (diff.orderChanges) {
     diff.orderChanges.forEach((orderChange) => {
       if (orderChange.oldOrder && orderChange.status) {
-        useKanbanStore.setState((draft) => {
+        useDataStore.setState((draft) => {
           if (!draft.cardOrder[orderChange.path]) {
             draft.cardOrder[orderChange.path] = {};
           }
@@ -118,14 +118,14 @@ const applyUndoAction = (action: UndoableAction) => {
  * Apply a redo action (reapply the changes)
  */
 const applyRedoAction = (action: UndoableAction) => {
-  const kanbanStore = useKanbanStore.getState();
+  const dataStore = useDataStore.getState();
   const diff = action.diff;
 
   // Handle created cards - recreate them on redo
   if (diff.created && diff.created.length > 0) {
     diff.created.forEach((created) => {
       // Recreate the card
-      useKanbanStore.setState((draft) => {
+      useDataStore.setState((draft) => {
         draft.cards[created.id] = created.data as KanbanCard;
         
         // Add to card order
@@ -158,14 +158,14 @@ const applyRedoAction = (action: UndoableAction) => {
   // Handle deleted cards - delete them again on redo
   if (diff.deleted && diff.deleted.length > 0) {
     diff.deleted.forEach((deleted) => {
-      kanbanStore.actions.deleteCard(deleted.id);
+      dataStore.actions.deleteCard(deleted.id);
     });
   }
 
   // Handle card changes - reapply them
   if (diff.cardChanges) {
     Object.entries(diff.cardChanges).forEach(([cardId, changes]) => {
-      const card = kanbanStore.cards[cardId];
+      const card = dataStore.cards[cardId];
       if (card) {
         const updates: Partial<KanbanCard> = {};
         
@@ -174,7 +174,7 @@ const applyRedoAction = (action: UndoableAction) => {
           updates[change.field as keyof KanbanCard] = change.newValue;
         });
         
-        kanbanStore.actions.updateCard(cardId, updates);
+        dataStore.actions.updateCard(cardId, updates);
       }
     });
   }
@@ -183,7 +183,7 @@ const applyRedoAction = (action: UndoableAction) => {
   if (diff.orderChanges) {
     diff.orderChanges.forEach((orderChange) => {
       if (orderChange.newOrder && orderChange.status) {
-        useKanbanStore.setState((draft) => {
+        useDataStore.setState((draft) => {
           if (!draft.cardOrder[orderChange.path]) {
             draft.cardOrder[orderChange.path] = {};
           }

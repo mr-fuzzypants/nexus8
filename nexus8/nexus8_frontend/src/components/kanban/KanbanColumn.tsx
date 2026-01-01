@@ -4,9 +4,11 @@ import { dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element
 import { IconDots, IconPlus, IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 import { shallow } from 'zustand/shallow';
 import { StatusDefinition } from '../../schema/kanbanSchema';
-import { useKanbanStore } from '../../state';
+import { useKanbanViewStore } from '../../state';
+import { useDataStore } from '../../state/useDataStore';
 import { CardVirtualList } from './CardVirtualList';
 import { KanbanCard as KanbanCardType } from '../../schema';
+import { v4 as uuidv4 } from 'uuid';
 
 interface KanbanColumnProps {
   status: StatusDefinition;
@@ -16,17 +18,14 @@ interface KanbanColumnProps {
 }
 
 export const KanbanColumn = React.memo(({ status, isAggregate, onAddChild, onCardClick }: KanbanColumnProps) => {
-  const { currentPath, layout } = useKanbanStore(
-    (state) => ({
-      currentPath: state.ui.currentPath,
-      layout: state.kanbanSchema.layout,
-    }),
-    shallow
-  );
+  const currentPath = useKanbanViewStore((state) => state.ui.currentPath);
+  
+  const layout = useDataStore(state => state.kanbanSchema.layout);
 
-  const actions = useKanbanStore((state) => state.actions);
+  const dataActions = useDataStore((state) => state.actions);
+  const viewActions = useKanbanViewStore((state) => state.actions);
 
-  const cards = useKanbanStore(
+  const cards = useDataStore(
     (state) => isAggregate 
       ? state.getCardsByAggregateStatus(currentPath, status.id)
       : state.getCardsByStatus(currentPath, status.id),
@@ -59,7 +58,7 @@ export const KanbanColumn = React.memo(({ status, isAggregate, onAddChild, onCar
     
     if (isAggregate) {
        // Find first status for this aggregate
-       const firstStatus = useKanbanStore.getState().kanbanSchema.statuses
+       const firstStatus = useDataStore.getState().kanbanSchema.statuses
          .sort((a, b) => a.order - b.order)
          .find(s => s.aggregateStatus === status.id);
          
@@ -70,30 +69,47 @@ export const KanbanColumn = React.memo(({ status, isAggregate, onAddChild, onCar
        }
     }
 
-    actions.createCard({
+    dataActions.addCard({
+      id: uuidv4(),
       title: 'New Card',
       description: '',
       status: targetStatusId,
       path: currentPath,
       metadata: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     });
   };
 
-  const handleEdit = (card: KanbanCardType) => actions.openCardEditor(card.id);
+  const handleEdit = (card: KanbanCardType) => {
+    viewActions.setSelectedCardId(card.id);
+    viewActions.setCardEditorOpen(true);
+  };
   
   const handleClick = (card: KanbanCardType) => {
     if (onCardClick) {
       onCardClick(card);
     } else {
-      actions.selectCard(card.id);
+      viewActions.setSelectedCardId(card.id);
     }
   };
   
-  const handleDuplicate = (card: KanbanCardType) => actions.duplicateCard(card.id);
-  const handleDelete = (card: KanbanCardType) => actions.deleteCard(card.id);
+  const handleDuplicate = (card: KanbanCardType) => {
+    dataActions.addCard({
+      ...card,
+      id: uuidv4(),
+      title: `${card.title} (Copy)`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  };
+
+  const handleDelete = (card: KanbanCardType) => dataActions.deleteCard(card.id);
   const handleView = (card: KanbanCardType) => {
-    actions.selectCard(card.id);
-    actions.setInfoPanelOpen(true);
+    viewActions.setSelectedCardId(card.id);
+    if (!useKanbanViewStore.getState().ui.infoPanelOpen) {
+        viewActions.toggleInfoPanel();
+    }
   };
   
   const handleAddChild = (card: KanbanCardType) => {
@@ -106,7 +122,13 @@ export const KanbanColumn = React.memo(({ status, isAggregate, onAddChild, onCar
 
   const handleNavigateToChildren = (card: KanbanCardType) => {
      const childPath = `${card.path}/${card.id}`;
-     actions.navigateToPath(childPath);
+     console.log('Navigating to children:', childPath);
+     if (viewActions && typeof viewActions.navigateToPath === 'function') {
+       viewActions.navigateToPath(childPath);
+     } else {
+       console.warn('viewActions.navigateToPath is not available, attempting direct store access');
+       useKanbanViewStore.getState().actions.navigateToPath(childPath);
+     }
   };
 
   // Get layout settings from schema

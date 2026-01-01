@@ -1,10 +1,10 @@
 import React from 'react';
 import { Box, Group, Text, Button, Slider, Stack } from '@mantine/core';
 import { shallow } from 'zustand/shallow';
-import { useKanbanStore } from '../../state';
+import { useKanbanViewStore } from '../../state';
 
 export const ScaleControls: React.FC = () => {
-  const { boardScale, cardScale } = useKanbanStore(
+  const { boardScale, cardScale } = useKanbanViewStore(
     (state) => ({
       boardScale: state.ui.boardScale,
       cardScale: state.ui.cardScale,
@@ -12,7 +12,7 @@ export const ScaleControls: React.FC = () => {
     shallow
   );
 
-  const actions = useKanbanStore((state) => state.actions);
+  const actions = useKanbanViewStore((state) => state.actions);
 
   return (
     <Stack gap="sm">

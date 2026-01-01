@@ -19,7 +19,7 @@ export function generateLargeTestDataset(count: number): KanbanCard[] {
       description: `Description for task ${i}`,
       status: statuses[Math.floor(Math.random() * statuses.length)],
       imageUrl: 'https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=300&h=160&fit=crop',
-      path: parentId && parentIndex !== undefined ? `${cards[parentIndex].path}/card-${i}` : `root`,
+      path: parentId && parentIndex !== undefined ? `${cards[parentIndex].path}/${parentId}` : `root`,
       parentId: parentId,
       metadata: {
         priority: priorities[Math.floor(Math.random() * priorities.length)],

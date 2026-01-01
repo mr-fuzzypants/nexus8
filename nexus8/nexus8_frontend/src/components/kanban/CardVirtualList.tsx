@@ -4,7 +4,7 @@ import { Box } from '@mantine/core';
 import { shallow } from 'zustand/shallow';
 import { KanbanCard } from './KanbanCard';
 import { KanbanCard as KanbanCardType } from '../../schema';
-import { useKanbanStore } from '../../state';
+import { useDataStore, useKanbanViewStore } from '../../state';
 
 interface CardVirtualListProps {
   cards: KanbanCardType[];
@@ -29,14 +29,11 @@ export const CardVirtualList: React.FC<CardVirtualListProps> = ({
 }) => {
   const parentRef = useRef<HTMLDivElement>(null);
   
-  const { virtualItemSize, overscan, selectedCardId } = useKanbanStore(
-    (state) => ({
-      virtualItemSize: state.kanbanSchema.settings?.virtualItemSize || 120,
-      overscan: state.kanbanSchema.settings?.overscan || 5,
-      selectedCardId: state.selection.selectedCardId,
-    }),
-    shallow
-  );
+  const kanbanSchema = useDataStore(state => state.kanbanSchema);
+  const selectedCardId = useKanbanViewStore(state => state.selection.selectedCardId);
+  
+  const virtualItemSize = kanbanSchema.settings?.virtualItemSize || 120;
+  const overscan = kanbanSchema.settings?.overscan || 5;
 
   const rowVirtualizer = useVirtualizer({
     count: cards.length,

@@ -22,7 +22,7 @@ import {
   IconArrowForwardUp,
   IconLayout,
 } from '@tabler/icons-react';
-import { useKanbanStore } from '../../state';
+import { useDataStore, useKanbanViewStore } from '../../state';
 import { useUndoRedo } from '../../state/useUndoRedo';
 import { useResponsive } from '../../utils';
 import { ColumnManagerModal } from './ColumnManagerModal';
@@ -41,22 +41,59 @@ export const NavigationBar: React.FC<NavigationBarProps> = ({
   style,
 }) => {
   const screenSize = useResponsive();
-  const { ui, getBreadcrumbItems, actions } = useKanbanStore();
+  const ui = useKanbanViewStore(state => state.ui);
+  console.log('NavigationBar render, currentPath:', ui.currentPath);
+  const viewActions = useKanbanViewStore(state => state.actions);
+  const cards = useDataStore(state => state.cards);
   const { canUndo, canRedo, undo, redo, undoDescription, redoDescription } = useUndoRedo();
   const [columnManagerOpened, setColumnManagerOpened] = useState(false);
   
+  const getBreadcrumbItems = (path: string) => {
+    const parts = path.split('/').filter(Boolean);
+    const items = [{ title: 'Home', path: 'root' }];
+    
+    let currentPath = '';
+    parts.forEach((part, index) => {
+      if (part === 'root') return;
+      
+      // If it's a card ID, look up the title
+      const card = cards[part];
+      const title = card ? card.title : part;
+      
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      // Reconstruct full path for navigation
+      // This logic assumes path structure is root/cardId/cardId...
+      // But wait, path in store is parent path.
+      // The currentPath in UI is the path we are viewing.
+      // If we are viewing 'root', we see root cards.
+      // If we are viewing 'root/card1', we see children of card1.
+      
+      // Let's reconstruct the path correctly.
+      // The parts array contains the segments.
+      // If path is 'root/A/B', parts are ['root', 'A', 'B'].
+      // Item 0: Home (root)
+      // Item 1: Card A (root/A)
+      // Item 2: Card B (root/A/B)
+      
+      const itemPath = parts.slice(0, index + 1).join('/');
+      items.push({ title, path: itemPath });
+    });
+    
+    return items;
+  };
+
   const breadcrumbItems = getBreadcrumbItems(ui.currentPath);
   
   const handleNavigateToPath = (path: string) => {
-    actions.navigateToPath(path);
+    viewActions.navigateToPath(path);
   };
   
   const handleGoBack = () => {
-    actions.goBack();
+    viewActions.goBack();
   };
   
   const handleGoForward = () => {
-    actions.goForward();
+    viewActions.goForward();
   };
   
   const canGoBack = ui.currentHistoryIndex > 0;
@@ -114,10 +151,10 @@ export const NavigationBar: React.FC<NavigationBarProps> = ({
                   {index === 0 ? (
                     <Group gap={4}>
                       <IconHome size={14} />
-                      <Text size="inherit">{item.label}</Text>
+                      <Text size="inherit">{item.title}</Text>
                     </Group>
                   ) : (
-                    item.label
+                    item.title
                   )}
                 </Anchor>
               ))}
@@ -162,7 +199,7 @@ export const NavigationBar: React.FC<NavigationBarProps> = ({
           <Tooltip label="Global Settings">
             <ActionIcon
               variant="light"
-              onClick={() => actions.openSettings()}
+              onClick={() => viewActions.setSettingsModalOpen(true)}
             >
               <IconSettings size={16} />
             </ActionIcon>

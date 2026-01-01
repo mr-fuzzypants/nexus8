@@ -11,13 +11,19 @@ import { TreeTableDemo } from './TreeTableDemo';
 import { ScaleDebugger } from '../components/ScaleDebugger';
 import { UndoKeyboardShortcuts } from '../components/UndoKeyboardShortcuts';
 import { UndoPerformanceMonitor } from '../components/UndoPerformanceMonitor';
-import { useKanbanStore } from '../state';
+import { useKanbanViewStore } from '../state';
+import { useDataStore } from '../state/useDataStore';
 import { useUndoIntegration } from '../hooks/useUndoIntegration';
 import { generateLargeTestDataset, initialSampleCards, convertCardsToTreeNodes } from '../utils/demoData';
+import { v4 as uuidv4 } from 'uuid';
 import '../index.css';
 
 export function KanbanDemo() {
-  const { ui, actions, cards } = useKanbanStore();
+  const ui = useKanbanViewStore(state => state.ui);
+  const viewActions = useKanbanViewStore(state => state.actions);
+  const { addCard } = useDataStore(state => state.actions);
+  const cards = useDataStore(state => state.cards);
+  
   const [activeTab, setActiveTab] = useState<string | null>('kanban');
   const [isLoadingData, setIsLoadingData] = useState(false);
   
@@ -28,20 +34,60 @@ export function KanbanDemo() {
   const treeData = useMemo(() => convertCardsToTreeNodes(cards), [cards]);
 
   useEffect(() => {
+    // Only initialize if empty
+    if (Object.keys(cards).length > 0) return;
+
     // Initialize with some sample data including parent-child relationships
     const sampleCards = initialSampleCards;
+    const createdCards: any[] = [];
+
+    // Helper to create a card with defaults
+    const createCard = (cardData: any) => {
+        const id = `card-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const now = new Date().toISOString();
+        const card = {
+            ...cardData,
+            id,
+            createdAt: now,
+            updatedAt: now,
+            path: cardData.path || 'root',
+            metadata: cardData.metadata || {},
+            children: [],
+        };
+        addCard(card);
+        createdCards.push(card);
+        return id;
+    };
 
     // Create sample cards first
     const createdCardIds = sampleCards.map(card => {
-      return actions.createCard(card as any);
+      return createCard(card);
     });
 
     // Add some child cards to demonstrate hierarchy
     if (createdCardIds.length > 0) {
       // Add child tasks to the Epic card
       const epicId = createdCardIds[0];
+      const epicCard = createdCards.find(c => c.id === epicId);
       
-      actions.createChildCard(epicId, {
+      const createChild = (data: any) => {
+          const childId = createCard({
+              ...data,
+              parentId: epicId,
+              path: `${epicCard.path}/${epicId}`,
+              status: data.status || epicCard.status,
+          });
+          // Update parent
+          // Note: addCard doesn't automatically update parent's children array in this simple script
+          // But useDataStore.reparentCard does. 
+          // For initialization, we should probably just construct the objects correctly or use reparentCard.
+          // Let's use reparentCard from the store if available, but we are inside useEffect.
+          // Actually, let's just manually update the parent in the store for this init script
+          // OR better, use the store action reparentCard after adding.
+          useDataStore.getState().actions.reparentCard(childId, epicId);
+      };
+      
+      createChild({
         title: 'Task: Design Login UI',
         description: 'Create wireframes and mockups for login interface',
         status: 'todo',
@@ -53,7 +99,7 @@ export function KanbanDemo() {
         },
       });
       
-      actions.createChildCard(epicId, {
+      createChild({
         title: 'Task: Implement JWT Authentication',
         description: 'Backend implementation for JWT token-based auth',
         status: 'inprogress',
@@ -65,7 +111,7 @@ export function KanbanDemo() {
         },
       });
       
-      actions.createChildCard(epicId, {
+      createChild({
         title: 'Task: Password Reset Flow',
         description: 'Implement forgot password and reset functionality',
         status: 'todo',
@@ -79,8 +125,19 @@ export function KanbanDemo() {
 
       // Add a child to the Dashboard feature
       const dashboardId = createdCardIds[1];
+      const dashboardCard = createdCards.find(c => c.id === dashboardId);
       
-      actions.createChildCard(dashboardId, {
+      const createDashboardChild = (data: any) => {
+          const childId = createCard({
+              ...data,
+              parentId: dashboardId,
+              path: `${dashboardCard.path}/${dashboardId}`,
+              status: data.status || dashboardCard.status,
+          });
+          useDataStore.getState().actions.reparentCard(childId, dashboardId);
+      };
+
+      createDashboardChild({
         title: 'Subtask: Chart Component',
         description: 'Build reusable chart components using recharts',
         status: 'inprogress',
@@ -92,7 +149,7 @@ export function KanbanDemo() {
         },
       });
     }
-  }, [actions]);
+  }, [cards, addCard]);
 
   // Generate large test dataset
   useEffect(() => {
@@ -112,8 +169,7 @@ export function KanbanDemo() {
         const batch = largeDataset.slice(index, index + BATCH_SIZE);
         
         batch.forEach(card => {
-          const { id, createdAt, updatedAt, ...cardData } = card;
-          actions.createCard(cardData);
+          addCard(card);
         });
         
         index += BATCH_SIZE;
@@ -130,26 +186,31 @@ export function KanbanDemo() {
       // Start adding cards
       setTimeout(addBatch, 0);
     }
-  }, [actions]);
+  }, [addCard, isLoadingData]);
 
 
   const handleNewCard = (status: string) => {
-    actions.createCard({
+    addCard({
+      id: uuidv4(),
       title: 'New Card',
       description: 'Enter card description',
       status,
       path: ui.currentPath,
       metadata: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     });
   };
 
   const handleCardClick = (card: any) => {
-    actions.selectCard(card.id);
-    actions.setInfoPanelOpen(true);
+    viewActions.setSelectedCardId(card.id);
+    if (!ui.infoPanelOpen) {
+        viewActions.toggleInfoPanel();
+    }
   };
 
   const handleSearch = () => {
-    actions.openSearch();
+    viewActions.setSearchModalOpen(true);
   };
 
   return (
@@ -159,9 +220,9 @@ export function KanbanDemo() {
       
       <SettingsModal
         opened={ui.settingsModalOpen}
-        onClose={() => actions.closeSettings()}
+        onClose={() => viewActions.setSettingsModalOpen(false)}
         showPerformanceMonitor={ui.showPerformanceMonitor}
-        onTogglePerformanceMonitor={actions.setShowPerformanceMonitor}
+        onTogglePerformanceMonitor={viewActions.setShowPerformanceMonitor}
       />
       
       <AppShell
@@ -193,7 +254,7 @@ export function KanbanDemo() {
                 <KanbanBoard
                   onCardClick={handleCardClick}
                   onNewCard={handleNewCard}
-                  onSettingsClick={() => actions.openSettings()}
+                  onSettingsClick={() => viewActions.setSettingsModalOpen(true)}
                   onFilterClick={() => console.log('Filter clicked')}
                   onSearchClick={handleSearch}
                 />
@@ -208,7 +269,7 @@ export function KanbanDemo() {
 
         {ui.infoPanelOpen && (
           <AppShell.Aside>
-            <InfoPanel onClose={() => actions.setInfoPanelOpen(false)} />
+            <InfoPanel />
           </AppShell.Aside>
         )}
       </AppShell>

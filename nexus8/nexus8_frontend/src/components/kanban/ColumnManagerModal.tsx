@@ -21,7 +21,7 @@ import { draggable, dropTargetForElements, monitorForElements } from '@atlaskit/
 import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine';
 import { attachClosestEdge, extractClosestEdge, Edge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge';
 import { IconPlus, IconTrash, IconGripVertical, IconEdit, IconSettings, IconArrowRight } from '@tabler/icons-react';
-import { useKanbanStore } from '../../state';
+import { useDataStore } from '../../state/useDataStore';
 import type { StatusDefinition, AggregateStatusType } from '../../schema';
 import { defaultAggregateStatuses } from '../../schema';
 
@@ -163,7 +163,8 @@ const DraggableColumnItem = ({
 };
 
 export const ColumnManagerModal: React.FC<ColumnManagerProps> = ({ opened, onClose }) => {
-  const { kanbanSchema, actions } = useKanbanStore();
+  const kanbanSchema = useDataStore(state => state.kanbanSchema);
+  const dataActions = useDataStore(state => state.actions);
   const [editingColumn, setEditingColumn] = useState<StatusDefinition | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   
@@ -199,18 +200,16 @@ export const ColumnManagerModal: React.FC<ColumnManagerProps> = ({ opened, onClo
         
         newStatuses.splice(targetIndex, 0, movedStatus);
         
-        const updatedStatuses = newStatuses.map((s, i) => ({
-          ...s,
-          order: i + 1
-        }));
+        // Update order property
+        newStatuses.forEach((s, i) => s.order = i);
         
-        actions.updateKanbanSchema({
-          ...kanbanSchema,
-          statuses: updatedStatuses
+        dataActions.updateKanbanSchema({
+            ...kanbanSchema,
+            statuses: newStatuses
         });
-      }
+      },
     });
-  }, [kanbanSchema, actions]);
+  }, [kanbanSchema, dataActions]);
 
   const [formData, setFormData] = useState({
     id: '',
@@ -289,18 +288,18 @@ export const ColumnManagerModal: React.FC<ColumnManagerProps> = ({ opened, onClo
       statuses: updatedStatuses,
     };
 
-    actions.updateKanbanSchema(updatedSchema);
+    dataActions.updateKanbanSchema(updatedSchema);
     setIsAddModalOpen(false);
     resetForm();
-  }, [formData, editingColumn, kanbanSchema, actions, resetForm]);
+  }, [formData, editingColumn, kanbanSchema, dataActions, resetForm]);
 
   const handleDeleteColumn = useCallback((columnId: string) => {
     const updatedSchema = {
       ...kanbanSchema,
       statuses: kanbanSchema.statuses.filter(s => s.id !== columnId),
     };
-    actions.updateKanbanSchema(updatedSchema);
-  }, [kanbanSchema, actions]);
+    dataActions.updateKanbanSchema(updatedSchema);
+  }, [kanbanSchema, dataActions]);
 
   const handleEditColumn = useCallback((status: StatusDefinition) => {
     setEditingColumn(status);

@@ -1,6 +1,8 @@
 // State exports
 export * from './useKanbanStore';
 export * from './useUndoRedo';
+export * from './useDataStore';
+export * from './useKanbanViewStore';
 
 // Re-export main hooks for convenience
 export {

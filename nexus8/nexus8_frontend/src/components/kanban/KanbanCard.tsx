@@ -358,6 +358,7 @@ const KanbanCardComponent: React.FC<KanbanCardProps> = ({
             fit="cover"
             radius="sm"
             placeholder="https://via.placeholder.com/300x160?text=Loading..."
+            lazy={false}
           />
         )}
         

@@ -23,7 +23,6 @@ import {
   IconRefresh,
 } from '@tabler/icons-react';
 import { shallow } from 'zustand/shallow';
-import { useKanbanStore } from '../../state';
 
 import { ScaleControls } from './ScaleControls';
 

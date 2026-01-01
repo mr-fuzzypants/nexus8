@@ -1,10 +1,10 @@
 import React from 'react';
 import { Box, Stack, Text } from '@mantine/core';
 import { KanbanBoard, ScaleControls } from '../components/kanban';
-import { useKanbanStore } from '../state/useKanbanStore';
+import { useKanbanViewStore } from '../state';
 
 const ScaleTestDemo: React.FC = () => {
-  const { boardScale, cardScale } = useKanbanStore(state => state.ui);
+  const { boardScale, cardScale } = useKanbanViewStore(state => state.ui);
   
   return (
     <Box p="md">

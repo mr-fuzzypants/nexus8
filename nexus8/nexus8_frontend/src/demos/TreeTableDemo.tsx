@@ -4,6 +4,7 @@ import { TreeTable } from '../components/treetable';
 import { ColumnVisibilityControl } from '../components/treetable/ColumnVisibilityControl';
 import { TreeTableSchema } from '../schema/treeTableSchema';
 import { TreeNode, useTreeGridStore } from '../state/useTreeGridStore';
+import { useDataStore } from '../state/useDataStore';
 
 interface TreeTableDemoProps {
   data?: TreeNode[];
@@ -11,6 +12,33 @@ interface TreeTableDemoProps {
 
 export const TreeTableDemo: React.FC<TreeTableDemoProps> = ({ data = [] }) => {
   const { expandAll, collapseAll } = useTreeGridStore();
+  const { reparentCard } = useDataStore(state => state.actions);
+  const cards = useDataStore(state => state.cards);
+
+  const handleNodeMove = (nodeId: string, targetNodeId: string, position: 'before' | 'after' | 'inside') => {
+    const targetCard = cards[targetNodeId];
+    if (!targetCard) return;
+
+    if (position === 'inside') {
+      reparentCard(nodeId, targetNodeId);
+    } else {
+      const parentId = targetCard.parentId || null;
+      let index: number | undefined = undefined;
+
+      // Calculate index based on target's position in its parent's children
+      if (parentId) {
+        const parent = cards[parentId];
+        if (parent && parent.children) {
+          const targetIndex = parent.children.indexOf(targetNodeId);
+          if (targetIndex !== -1) {
+            index = position === 'after' ? targetIndex + 1 : targetIndex;
+          }
+        }
+      }
+      
+      reparentCard(nodeId, parentId, index);
+    }
+  };
 
   const schema = useMemo(() => TreeTableSchema.parse({
     version: '1.0.0',
@@ -134,6 +162,7 @@ export const TreeTableDemo: React.FC<TreeTableDemoProps> = ({ data = [] }) => {
         <TreeTable 
           data={data} 
           schema={schema} 
+          onNodeMove={handleNodeMove}
         />
       </Paper>
     </Box>

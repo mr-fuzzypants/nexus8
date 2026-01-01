@@ -1,4 +1,4 @@
-import { create } from 'zustand';
+import { createWithEqualityFn } from 'zustand/traditional';
 import { persist, subscribeWithSelector } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
 import type {
@@ -240,7 +240,7 @@ const initialFilterState: FilterState = {
 };
 
 // Create the store
-export const useKanbanStore = create<KanbanState>()(
+export const useKanbanStore = createWithEqualityFn<KanbanState>()(
   persist(
     subscribeWithSelector(
       immer((set, get) => ({
@@ -1211,6 +1211,20 @@ export const useKanbanStore = create<KanbanState>()(
           minScale: state.ui.minScale,
           maxScale: state.ui.maxScale,
         },
+      }),
+      merge: (persistedState, currentState) => ({
+        ...currentState,
+        ...(persistedState as object),
+        actions: currentState.actions,
+        // Also preserve getters if they are in state
+        getCardsAtPath: currentState.getCardsAtPath,
+        getCardsByStatus: currentState.getCardsByStatus,
+        getCardsByAggregateStatus: currentState.getCardsByAggregateStatus,
+        getFilteredCards: currentState.getFilteredCards,
+        getCardChildren: currentState.getCardChildren,
+        getCardParent: currentState.getCardParent,
+        getPathSegments: currentState.getPathSegments,
+        getBreadcrumbItems: currentState.getBreadcrumbItems,
       }),
       onRehydrateStorage: () => {
         return (state, error) => {

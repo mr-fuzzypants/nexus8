@@ -1,7 +1,10 @@
-import React from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { VirtualItem } from '@tanstack/react-virtual';
 import { Box, Text, useMantineTheme, ActionIcon } from '@mantine/core';
 import { IconChevronRight, IconChevronDown, IconFile } from '@tabler/icons-react';
+import { draggable, dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine';
+import { attachClosestEdge, Edge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge';
 import { useTreeGridStore, FlatTreeNode } from '../../state/useTreeGridStore';
 import { TreeTableCell } from './TreeTableCell';
 
@@ -17,6 +20,10 @@ export const TreeTableRow: React.FC<TreeTableRowProps> = ({
   totalWidth 
 }) => {
   const theme = useMantineTheme();
+  const rowRef = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [closestEdge, setClosestEdge] = useState<Edge | null>(null);
+
   const { 
     schema, 
     columnOrder, 
@@ -26,6 +33,44 @@ export const TreeTableRow: React.FC<TreeTableRowProps> = ({
     selectNode,
     selectedNodeIds
   } = useTreeGridStore();
+
+  useEffect(() => {
+    const element = rowRef.current;
+    if (!element || node.isGroup) return;
+
+    return combine(
+      draggable({
+        element,
+        getInitialData: () => ({ type: 'row', id: node.id, node }),
+        onDragStart: () => setIsDragging(true),
+        onDrop: () => setIsDragging(false),
+      }),
+      dropTargetForElements({
+        element,
+        getData: ({ input }) => attachClosestEdge(
+          { type: 'row', id: node.id, node },
+          { element, input, allowedEdges: ['top', 'bottom', 'left', 'right'] } // 'left'/'right' might be used for nesting?
+          // Actually, usually top/bottom for reorder, and maybe center or specific zone for nesting.
+          // But attachClosestEdge only supports top/bottom/left/right.
+          // We can use 'bottom' of a parent to mean "insert after" or "insert inside"?
+          // Let's stick to standard edges. We might need a custom hitbox for "inside".
+          // For now, let's just use top/bottom and maybe we can infer nesting if hovering over the middle?
+          // attachClosestEdge divides the element.
+        ),
+        onDragEnter: ({ self }) => {
+            // We can extract edge here for local state
+        },
+        onDrag: ({ self }) => {
+            setClosestEdge(self.data.edge as Edge);
+        },
+        onDragLeave: () => setClosestEdge(null),
+        onDrop: () => {
+            setIsDragging(false);
+            setClosestEdge(null);
+        },
+      })
+    );
+  }, [node]);
 
   const isSelected = selectedNodeIds.has(node.id);
   const indentation = schema.options?.indentation || 20;
@@ -82,6 +127,7 @@ export const TreeTableRow: React.FC<TreeTableRowProps> = ({
 
   return (
     <div
+      ref={rowRef}
       style={{
         position: 'absolute',
         top: 0,
@@ -92,7 +138,15 @@ export const TreeTableRow: React.FC<TreeTableRowProps> = ({
         display: 'flex',
         backgroundColor: isSelected ? theme.colors.blue[0] : 'white',
         borderBottom: `1px solid ${theme.colors.gray[2]}`,
-        cursor: 'pointer',
+        cursor: 'grab',
+        opacity: isDragging ? 0.5 : 1,
+        // Visual feedback for drop
+        boxShadow: closestEdge === 'top' 
+          ? `inset 0 2px 0 ${theme.colors.blue[5]}` 
+          : closestEdge === 'bottom' 
+            ? `inset 0 -2px 0 ${theme.colors.blue[5]}` 
+            : undefined,
+        zIndex: isDragging ? 100 : undefined,
       }}
       onClick={() => selectNode(node.id)}
     >

@@ -13,8 +13,9 @@ import {
 } from '@mantine/core';
 import { IconPlus, IconX, IconPhoto } from '@tabler/icons-react';
 import type { KanbanCard } from '../../schema';
-import { useKanbanStore } from '../../state';
+import { useDataStore } from '../../state/useDataStore';
 import { AsyncImage } from '../AsyncImage';
+import { v4 as uuidv4 } from 'uuid';
 
 interface AddChildCardModalProps {
   opened: boolean;
@@ -27,7 +28,9 @@ export const AddChildCardModal: React.FC<AddChildCardModalProps> = ({
   onClose,
   parentCard,
 }) => {
-  const { actions, kanbanSchema, cardSchema } = useKanbanStore();
+  const kanbanSchema = useDataStore(state => state.kanbanSchema);
+  const cardSchema = useDataStore(state => state.cardSchema);
+  const dataActions = useDataStore(state => state.actions);
   
   const [formData, setFormData] = useState({
     title: '',
@@ -71,25 +74,34 @@ export const AddChildCardModal: React.FC<AddChildCardModalProps> = ({
     setIsLoading(true);
 
     try {
+      const newCardId = uuidv4();
       const childCardData = {
+        id: newCardId,
         title: formData.title.trim(),
         description: formData.description.trim(),
         imageUrl: formData.imageUrl.trim() || undefined,
         status: formData.status || parentCard.status,
+        path: `${parentCard.path}/${parentCard.id}`, // Set correct path immediately
+        parentId: parentCard.id, // Set parentId immediately
         metadata: {
           priority: formData.priority,
           assignee: formData.assignee || undefined,
         },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
 
-      actions.createChildCard(parentCard.id, childCardData);
+      dataActions.addCard(childCardData);
+      // Also update parent's children array
+      dataActions.reparentCard(newCardId, parentCard.id);
+      
       onClose();
     } catch (error) {
       console.error('Error creating child card:', error);
     } finally {
       setIsLoading(false);
     }
-  }, [parentCard, formData, actions, onClose]);
+  }, [parentCard, formData, dataActions, onClose]);
 
   const handleClose = useCallback(() => {
     setFormData({

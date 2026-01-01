@@ -18,7 +18,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { IconEdit, IconX, IconTrash, IconPhoto } from '@tabler/icons-react';
-import { useKanbanStore } from '../../state';
+import { useDataStore } from '../../state/useDataStore';
 import { AsyncImage } from '../AsyncImage';
 
 interface CardEditorModalProps {
@@ -32,7 +32,10 @@ export const CardEditorModal: React.FC<CardEditorModalProps> = ({
   onClose,
   cardId,
 }) => {
-  const { cards, actions, kanbanSchema, cardSchema } = useKanbanStore();
+  const cards = useDataStore(state => state.cards);
+  const kanbanSchema = useDataStore(state => state.kanbanSchema);
+  const cardSchema = useDataStore(state => state.cardSchema);
+  const dataActions = useDataStore(state => state.actions);
   
   const [formData, setFormData] = useState({
     title: '',
@@ -100,34 +103,36 @@ export const CardEditorModal: React.FC<CardEditorModalProps> = ({
           priority: formData.priority,
           assignee: formData.assignee || undefined,
           progress: formData.progress,
-          storyPoints: formData.storyPoints || undefined,
-          tags: formData.tags.length > 0 ? formData.tags : undefined,
+          storyPoints: formData.storyPoints,
+          tags: formData.tags,
           dueDate: formData.dueDate || undefined,
         },
       };
 
-      actions.updateCard(card.id, updatedCard);
+      dataActions.updateCard(card.id, updatedCard);
       onClose();
     } catch (error) {
       console.error('Error updating card:', error);
     } finally {
       setIsLoading(false);
     }
-  }, [card, formData, actions, onClose]);
+  }, [card, formData, dataActions, onClose]);
 
-  const handleDelete = useCallback(async () => {
+  const handleDelete = useCallback(() => {
     if (!card) return;
-
-    setIsDeleting(true);
-    try {
-      actions.deleteCard(card.id);
-      onClose();
-    } catch (error) {
-      console.error('Error deleting card:', error);
-    } finally {
-      setIsDeleting(false);
+    
+    if (window.confirm('Are you sure you want to delete this card?')) {
+      setIsDeleting(true);
+      try {
+        dataActions.deleteCard(card.id);
+        onClose();
+      } catch (error) {
+        console.error('Error deleting card:', error);
+      } finally {
+        setIsDeleting(false);
+      }
     }
-  }, [card, actions, onClose]);
+  }, [card, dataActions, onClose]);
 
   const handleClose = useCallback(() => {
     setFormData({

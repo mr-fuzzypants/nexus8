@@ -1,9 +1,12 @@
 import React from 'react';
 import { Paper, Text, Title, Group, CloseButton, Stack, Divider } from '@mantine/core';
-import { useKanbanStore } from '../../state';
+import { useDataStore, useKanbanViewStore } from '../../state';
 
 export const InfoPanel: React.FC = () => {
-  const { ui, selection, cards, actions } = useKanbanStore();
+  const ui = useKanbanViewStore(state => state.ui);
+  const selection = useKanbanViewStore(state => state.selection);
+  const viewActions = useKanbanViewStore(state => state.actions);
+  const cards = useDataStore(state => state.cards);
   
   if (!ui.infoPanelOpen) return null;
   
@@ -19,7 +22,7 @@ export const InfoPanel: React.FC = () => {
     >
       <Group justify="space-between" mb="md">
         <Title order={4}>Details</Title>
-        <CloseButton onClick={() => actions.setInfoPanelOpen(false)} />
+        <CloseButton onClick={() => viewActions.toggleInfoPanel()} />
       </Group>
       
       {selectedCard ? (

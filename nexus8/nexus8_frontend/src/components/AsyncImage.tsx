@@ -15,6 +15,7 @@ interface AsyncImageProps {
   onError?: () => void;
   className?: string;
   style?: React.CSSProperties;
+  lazy?: boolean;
 }
 
 type LoadingState = 'loading' | 'loaded' | 'error' | 'no-image';
@@ -39,15 +40,16 @@ export const AsyncImage: React.FC<AsyncImageProps> = ({
   onError,
   className,
   style,
+  lazy = true,
 }) => {
   const [loadingState, setLoadingState] = useState<LoadingState>('loading');
   const [imageSrc, setImageSrc] = useState<string | null>(null);
-  const [isInView, setIsInView] = useState(false);
+  const [isInView, setIsInView] = useState(!lazy);
   const imgRef = React.useRef<HTMLDivElement>(null);
 
   // Intersection Observer for lazy loading
   useEffect(() => {
-    if (!imgRef.current) return;
+    if (!lazy || isInView || !imgRef.current) return;
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -68,7 +70,7 @@ export const AsyncImage: React.FC<AsyncImageProps> = ({
     return () => {
       observer.disconnect();
     };
-  }, []);
+  }, [lazy, isInView]);
 
   // Handle image loading
   useEffect(() => {

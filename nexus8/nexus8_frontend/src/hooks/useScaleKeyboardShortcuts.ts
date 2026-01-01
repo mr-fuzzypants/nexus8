@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
-import { useKanbanStore } from '../state/useKanbanStore';
+import { useKanbanViewStore } from '../state';
 
 export const useScaleKeyboardShortcuts = () => {
-  const { zoomIn, zoomOut, resetScale } = useKanbanStore(state => state.actions);
+  const { zoomIn, zoomOut, resetScale } = useKanbanViewStore(state => state.actions);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {

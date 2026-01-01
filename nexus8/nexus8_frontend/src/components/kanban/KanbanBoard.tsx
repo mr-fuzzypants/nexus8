@@ -4,7 +4,7 @@ import { extractClosestEdge } from '@atlaskit/pragmatic-drag-and-drop-hitbox/clo
 import { Box, Flex, Button, Tooltip, SegmentedControl } from '@mantine/core';
 import { IconSettings } from '@tabler/icons-react';
 import { shallow } from 'zustand/shallow';
-import { useKanbanStore } from '../../state';
+import { useDataStore, useKanbanViewStore } from '../../state';
 import { KanbanColumn } from './KanbanColumn';
 import { AddChildCardModal } from './AddChildCardModal';
 import { ColumnManagerModal } from './ColumnManagerModal';
@@ -22,16 +22,12 @@ interface KanbanBoardProps {
 export const KanbanBoard: React.FC<KanbanBoardProps> = ({
   onCardClick,
 }) => {
-  const { kanbanSchema, ui, selection } = useKanbanStore(
-    (state) => ({
-      kanbanSchema: state.kanbanSchema,
-      ui: state.ui,
-      selection: state.selection,
-    }),
-    shallow
-  );
+  const kanbanSchema = useDataStore((state) => state.kanbanSchema);
+  const ui = useKanbanViewStore((state) => state.ui);
+  const selection = useKanbanViewStore((state) => state.selection);
   
-  const actions = useKanbanStore((state) => state.actions);
+  const dataActions = useDataStore((state) => state.actions);
+  const viewActions = useKanbanViewStore((state) => state.actions);
 
   const [childModalOpen, setChildModalOpen] = useState(false);
   const [columnManagerOpen, setColumnManagerOpen] = useState(false);
@@ -63,16 +59,16 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
             if (isAggregate) {
                // Find the first status that maps to this aggregate status
-               const firstStatus = useKanbanStore.getState().kanbanSchema.statuses
+               const firstStatus = useDataStore.getState().kanbanSchema.statuses
                  .sort((a, b) => a.order - b.order)
                  .find(s => s.aggregateStatus === statusId);
                  
                if (firstStatus && sourceCard.status !== firstStatus.id) {
-                 actions.moveCard(cardId, firstStatus.id);
+                 dataActions.updateCard(cardId, { status: firstStatus.id });
                }
             } else {
               if (sourceCard.status !== statusId) {
-                actions.moveCard(cardId, statusId);
+                dataActions.updateCard(cardId, { status: statusId });
               }
             }
           }
@@ -86,28 +82,27 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
             // If different status, move to that status first
             if (sourceCard.status !== targetCard.status) {
-              actions.moveCard(cardId, targetCard.status);
+              dataActions.updateCard(cardId, { status: targetCard.status });
             }
             
             // Handle reordering
             const edge = extractClosestEdge(destinationData);
             if (edge) {
                // Get current order
-               const currentOrder = useKanbanStore.getState().cardOrder[targetCard.path]?.[targetCard.status] || [];
+               const path = targetCard.path || 'root';
+               const currentOrder = useDataStore.getState().cardOrder[path]?.[targetCard.status] || [];
                const targetIndex = currentOrder.indexOf(targetId);
                
                if (targetIndex !== -1) {
                  const newIndex = edge === 'top' ? targetIndex : targetIndex + 1;
-                 // Adjust index if moving downwards in same list
-                 // This logic is simplified; robust reordering usually requires more checks
-                 actions.moveCard(cardId, targetCard.status, newIndex);
+                 dataActions.reorderCard(cardId, newIndex);
                }
             }
           }
         }
       },
     });
-  }, [actions]);
+  }, [dataActions]);
 
   return (
     <>
@@ -205,7 +200,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
 
       <CardEditorModal
         opened={ui.cardEditorOpen}
-        onClose={() => actions.closeCardEditor()}
+        onClose={() => viewActions.setCardEditorOpen(false)}
         cardId={selection.selectedCardId || null}
       />
     </>

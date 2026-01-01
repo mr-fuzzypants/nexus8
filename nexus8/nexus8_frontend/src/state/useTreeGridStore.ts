@@ -67,6 +67,7 @@ interface TreeGridState<T = any> {
   // Editing Actions
   setEditingCell: (cell: { nodeId: string; columnId: string } | null) => void;
   updateNodeData: (nodeId: string, field: string, value: any) => void;
+  moveNode: (nodeId: string, targetNodeId: string | null, position: 'before' | 'after' | 'inside') => void;
 }
 
 // Helper to sort tree
@@ -413,5 +414,94 @@ export const useTreeGridStore = create<TreeGridState>((set, get) => ({
     const flatData = flattenTree(sortedData, expandedNodeIds);
     
     set({ rawData: newRawData, flatData });
+  },
+
+  moveNode: (nodeId, targetNodeId, position) => {
+    const { rawData, groupBy, expandedNodeIds, sortConfig } = get();
+    
+    // Deep clone to avoid mutation issues
+    const newData = JSON.parse(JSON.stringify(rawData));
+
+    // Helper to find and remove node
+    let movedNode: TreeNode | null = null;
+    const removeNode = (nodes: TreeNode[]): TreeNode[] => {
+      return nodes.filter(node => {
+        if (node.id === nodeId) {
+          movedNode = node;
+          return false;
+        }
+        if (node.children) {
+          node.children = removeNode(node.children);
+        }
+        return true;
+      });
+    };
+
+    const dataWithoutNode = removeNode(newData);
+    
+    if (!movedNode) return;
+
+    // Helper to insert node
+    const insertNode = (nodes: TreeNode[]): TreeNode[] => {
+      // If target is null, we are appending to root (handled outside)
+      return nodes.map(node => {
+        if (node.id === targetNodeId) {
+          if (position === 'inside') {
+            return {
+              ...node,
+              children: [...(node.children || []), movedNode!]
+            };
+          }
+          return node;
+        }
+        
+        if (node.children) {
+          // Check if target is a direct child (for before/after)
+          if (position !== 'inside') {
+            const targetIndex = node.children.findIndex(c => c.id === targetNodeId);
+            if (targetIndex !== -1) {
+              const newChildren = [...node.children];
+              if (position === 'before') {
+                newChildren.splice(targetIndex, 0, movedNode!);
+              } else {
+                newChildren.splice(targetIndex + 1, 0, movedNode!);
+              }
+              return { ...node, children: newChildren };
+            }
+          }
+          
+          return { ...node, children: insertNode(node.children) };
+        }
+        return node;
+      });
+    };
+
+    let finalData = dataWithoutNode;
+    
+    // Handle root level insertion or recursive insertion
+    if (targetNodeId === null) {
+        finalData.push(movedNode);
+    } else if (position !== 'inside') {
+        // Check if target is at root level
+        const targetIndex = finalData.findIndex(n => n.id === targetNodeId);
+        if (targetIndex !== -1) {
+            if (position === 'before') {
+                finalData.splice(targetIndex, 0, movedNode);
+            } else {
+                finalData.splice(targetIndex + 1, 0, movedNode);
+            }
+        } else {
+            finalData = insertNode(finalData);
+        }
+    } else {
+        finalData = insertNode(finalData);
+    }
+
+    // Re-process
+    const groupedData = groupRoots(finalData, groupBy);
+    const sortedData = sortTree(groupedData, sortConfig);
+    const flatData = flattenTree(sortedData, expandedNodeIds);
+    
+    set({ rawData: finalData, flatData });
   },
 }));

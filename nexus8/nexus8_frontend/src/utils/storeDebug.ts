@@ -1,8 +1,12 @@
 // Utility to clear Kanban store from localStorage
 export const clearKanbanStore = () => {
   if (typeof window !== 'undefined') {
+    // Clear legacy store
     localStorage.removeItem('kanban-store');
-    console.log('Kanban store cleared from localStorage');
+    // Clear new decoupled stores
+    localStorage.removeItem('nexus8-data-store');
+    localStorage.removeItem('nexus8-kanban-view-store');
+    console.log('Kanban stores cleared from localStorage');
   }
 };
 

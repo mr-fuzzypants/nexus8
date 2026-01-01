@@ -1,11 +1,11 @@
 import React from 'react';
 import { Box, Text, Code, Button, Group } from '@mantine/core';
-import { useKanbanStore } from '../state/useKanbanStore';
+import { useKanbanViewStore } from '../state';
 import { clearKanbanStore, debugKanbanStore } from '../utils/storeDebug';
 
 export const ScaleDebugger: React.FC = () => {
-  const ui = useKanbanStore(state => state.ui);
-  const actions = useKanbanStore(state => state.actions);
+  const ui = useKanbanViewStore(state => state.ui);
+  const actions = useKanbanViewStore(state => state.actions);
   
   const handleClearStore = () => {
     clearKanbanStore();

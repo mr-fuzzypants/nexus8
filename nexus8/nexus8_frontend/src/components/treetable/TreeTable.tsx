@@ -15,13 +15,15 @@ interface TreeTableProps {
   data: TreeNode[];
   className?: string;
   style?: React.CSSProperties;
+  onNodeMove?: (nodeId: string, targetNodeId: string, position: 'before' | 'after' | 'inside') => void;
 }
 
 export const TreeTable: React.FC<TreeTableProps> = ({ 
   schema, 
   data,
   className,
-  style 
+  style,
+  onNodeMove
 }) => {
   const theme = useMantineTheme();
   const parentRef = useRef<HTMLDivElement>(null);
@@ -36,7 +38,8 @@ export const TreeTable: React.FC<TreeTableProps> = ({
     columnVisibility,
     schema: currentSchema,
     addGroup,
-    reorderColumns
+    reorderColumns,
+    moveNode
   } = useTreeGridStore();
 
   useEffect(() => {
@@ -53,6 +56,25 @@ export const TreeTable: React.FC<TreeTableProps> = ({
           const field = sourceData.field as string;
           if (field) {
             addGroup(field);
+          }
+          return;
+        }
+
+        // Handle row reordering
+        if (sourceData.type === 'row' && destinationData.type === 'row') {
+          const sourceId = sourceData.id as string;
+          const destinationId = destinationData.id as string;
+
+          if (sourceId === destinationId) return;
+
+          const edge = extractClosestEdge(destinationData);
+          
+          if (edge === 'top') {
+            moveNode(sourceId, destinationId, 'before');
+            onNodeMove?.(sourceId, destinationId, 'before');
+          } else if (edge === 'bottom') {
+            moveNode(sourceId, destinationId, 'after');
+            onNodeMove?.(sourceId, destinationId, 'after');
           }
           return;
         }
