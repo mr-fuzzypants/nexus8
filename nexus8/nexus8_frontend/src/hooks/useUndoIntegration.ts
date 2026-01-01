@@ -109,6 +109,18 @@ const applyUndoAction = (action: UndoableAction) => {
           }
           draft.cardOrder[orderChange.path][orderChange.status!] = orderChange.oldOrder!;
         });
+      } else if (orderChange.oldIndex !== undefined && orderChange.newIndex !== undefined && orderChange.status && action.cardIds?.[0]) {
+         const cardId = action.cardIds[0];
+         useDataStore.setState((draft) => {
+            const list = draft.cardOrder[orderChange.path]?.[orderChange.status!];
+            if (list) {
+                const currentIndex = list.indexOf(cardId);
+                if (currentIndex !== -1) {
+                    list.splice(currentIndex, 1);
+                    list.splice(orderChange.oldIndex!, 0, cardId);
+                }
+            }
+         });
       }
     });
   }
@@ -189,6 +201,18 @@ const applyRedoAction = (action: UndoableAction) => {
           }
           draft.cardOrder[orderChange.path][orderChange.status!] = orderChange.newOrder!;
         });
+      } else if (orderChange.oldIndex !== undefined && orderChange.newIndex !== undefined && orderChange.status && action.cardIds?.[0]) {
+         const cardId = action.cardIds[0];
+         useDataStore.setState((draft) => {
+            const list = draft.cardOrder[orderChange.path]?.[orderChange.status!];
+            if (list) {
+                const currentIndex = list.indexOf(cardId);
+                if (currentIndex !== -1) {
+                    list.splice(currentIndex, 1);
+                    list.splice(orderChange.newIndex!, 0, cardId);
+                }
+            }
+         });
       }
     });
   }
