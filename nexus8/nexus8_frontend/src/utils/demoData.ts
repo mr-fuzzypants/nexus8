@@ -51,6 +51,7 @@ export function convertCardsToTreeNodes(cards: Record<string, KanbanCard>): Tree
         assignee: card.metadata?.assignee,
         progress: card.metadata?.progress,
         dueDate: card.metadata?.dueDate,
+        tags: card.metadata?.tags,
       },
       children: [],
       parentId: card.parentId || null,

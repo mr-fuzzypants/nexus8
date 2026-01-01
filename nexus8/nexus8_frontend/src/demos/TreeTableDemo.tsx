@@ -67,6 +67,22 @@ export const TreeTableDemo: React.FC<TreeTableDemoProps> = ({ data = [] }) => {
         ],
       },
       {
+        id: 'tags',
+        field: 'tags',
+        header: 'Tags',
+        width: 200,
+        type: 'tags',
+        editable: true,
+        selectOptions: ['frontend', 'backend', 'ui', 'bug', 'feature', 'design', 'database'],
+      },
+      {
+        id: 'description',
+        field: 'description',
+        header: 'Description',
+        width: 300,
+        editable: true,
+      },
+      {
         id: 'progress',
         field: 'progress',
         header: 'Progress',

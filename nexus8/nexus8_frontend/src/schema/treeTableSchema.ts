@@ -13,7 +13,7 @@ export const TreeTableColumnDefinition = z.object({
   maxWidth: z.number().optional(),
   
   // Type and Formatting
-  type: z.enum(['text', 'number', 'date', 'boolean', 'select', 'custom']).default('text'),
+  type: z.enum(['text', 'number', 'date', 'boolean', 'select', 'tags', 'custom']).default('text'),
   format: z.string().optional(), // Format string (e.g., for dates or numbers)
   selectOptions: z.array(z.string().or(z.object({ label: z.string(), value: z.string() }))).optional(),
   
@@ -109,6 +109,19 @@ export const defaultTreeTableSchema = TreeTableSchema.parse({
       field: 'type',
       header: 'Type',
       width: 150,
+    },
+    {
+      id: 'tags',
+      field: 'tags',
+      header: 'Tags',
+      width: 200,
+      type: 'tags',
+    },
+    {
+      id: 'description',
+      field: 'description',
+      header: 'Description',
+      width: 300,
     },
     {
       id: 'modified',

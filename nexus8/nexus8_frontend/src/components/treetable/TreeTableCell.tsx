@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { TextInput, NumberInput, Checkbox, Box, Select } from '@mantine/core';
+import { TextInput, NumberInput, Checkbox, Box, Select, Badge, Group, MultiSelect } from '@mantine/core';
 import { DateInput } from '@mantine/dates';
 import { useTreeGridStore, FlatTreeNode } from '../../state/useTreeGridStore';
 import { TreeTableColumnDefinition } from '../../schema/treeTableSchema';
@@ -105,6 +105,21 @@ export const TreeTableCell: React.FC<TreeTableCellProps> = ({ node, column, valu
             allowDeselect={false}
           />
         );
+      case 'tags':
+        return (
+          <MultiSelect
+            data={column.selectOptions ? (column.selectOptions as any) : (Array.isArray(editValue) ? editValue : [])}
+            value={Array.isArray(editValue) ? editValue : []}
+            onChange={(val) => setEditValue(val)}
+            onBlur={handleSave}
+            onKeyDown={handleKeyDown}
+            autoFocus
+            defaultDropdownOpened
+            searchable
+            size="xs"
+            styles={{ input: { minHeight: 24, padding: '0 4px' } }}
+          />
+        );
       default:
         return (
           <TextInput
@@ -135,6 +150,21 @@ export const TreeTableCell: React.FC<TreeTableCellProps> = ({ node, column, valu
     if (option) {
        displayValue = typeof option === 'string' ? option : option.label;
     }
+  } else if (column.type === 'tags' && Array.isArray(value)) {
+    return (
+      <Box 
+          onDoubleClick={handleDoubleClick}
+          style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', overflow: 'hidden' }}
+      >
+        <Group gap={4} wrap="nowrap">
+          {value.map((tag: string, i: number) => (
+            <Badge key={i} size="xs" variant="light">
+              {tag}
+            </Badge>
+          ))}
+        </Group>
+      </Box>
+    );
   } else if (column.type === 'boolean') {
     return (
         <Box 
