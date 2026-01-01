@@ -8,9 +8,10 @@ interface TreeTableCellProps {
   node: FlatTreeNode;
   column: TreeTableColumnDefinition;
   value: any;
+  onUpdate?: (nodeId: string, field: string, value: any) => void;
 }
 
-export const TreeTableCell: React.FC<TreeTableCellProps> = ({ node, column, value }) => {
+export const TreeTableCell: React.FC<TreeTableCellProps> = ({ node, column, value, onUpdate }) => {
   const { editingCell, setEditingCell, updateNodeData } = useTreeGridStore();
   const isEditing = editingCell?.nodeId === node.id && editingCell?.columnId === column.id;
   const [editValue, setEditValue] = useState(value);
@@ -24,6 +25,7 @@ export const TreeTableCell: React.FC<TreeTableCellProps> = ({ node, column, valu
   const handleSave = () => {
     if (editValue !== value) {
       updateNodeData(node.id, column.field, editValue);
+      onUpdate?.(node.id, column.field, editValue);
     }
     setEditingCell(null);
   };
@@ -86,6 +88,8 @@ export const TreeTableCell: React.FC<TreeTableCellProps> = ({ node, column, valu
                 onBlur={handleSave}
                 onKeyDown={handleKeyDown}
                 autoFocus
+                clearable
+                valueFormat="YYYY-MM-DD"
                 size="xs"
                 styles={{ input: { height: 24, minHeight: 24, padding: '0 4px' } }}
             />

@@ -12,8 +12,27 @@ interface TreeTableDemoProps {
 
 export const TreeTableDemo: React.FC<TreeTableDemoProps> = ({ data = [] }) => {
   const { expandAll, collapseAll } = useTreeGridStore();
-  const { reparentCard } = useDataStore(state => state.actions);
+  const { reparentCard, updateCard } = useDataStore(state => state.actions);
   const cards = useDataStore(state => state.cards);
+
+  const handleNodeUpdate = (nodeId: string, field: string, value: any) => {
+    const card = cards[nodeId];
+    if (!card) return;
+
+    // Fields that belong in metadata
+    const metadataFields = ['priority', 'assignee', 'tags', 'progress', 'dueDate'];
+
+    if (metadataFields.includes(field)) {
+      updateCard(nodeId, {
+        metadata: {
+          ...card.metadata,
+          [field]: value
+        }
+      });
+    } else {
+      updateCard(nodeId, { [field]: value });
+    }
+  };
 
   const handleNodeMove = (nodeId: string, targetNodeId: string, position: 'before' | 'after' | 'inside') => {
     const targetCard = cards[targetNodeId];
@@ -163,6 +182,7 @@ export const TreeTableDemo: React.FC<TreeTableDemoProps> = ({ data = [] }) => {
           data={data} 
           schema={schema} 
           onNodeMove={handleNodeMove}
+          onNodeUpdate={handleNodeUpdate}
         />
       </Paper>
     </Box>

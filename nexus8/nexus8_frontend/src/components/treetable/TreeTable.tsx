@@ -16,6 +16,7 @@ interface TreeTableProps {
   className?: string;
   style?: React.CSSProperties;
   onNodeMove?: (nodeId: string, targetNodeId: string, position: 'before' | 'after' | 'inside') => void;
+  onNodeUpdate?: (nodeId: string, field: string, value: any) => void;
 }
 
 export const TreeTable: React.FC<TreeTableProps> = ({ 
@@ -23,7 +24,8 @@ export const TreeTable: React.FC<TreeTableProps> = ({
   data,
   className,
   style,
-  onNodeMove
+  onNodeMove,
+  onNodeUpdate
 }) => {
   const theme = useMantineTheme();
   const parentRef = useRef<HTMLDivElement>(null);
@@ -198,6 +200,7 @@ export const TreeTable: React.FC<TreeTableProps> = ({
                   node={node}
                   virtualRow={virtualRow}
                   totalWidth={totalWidth}
+                  onNodeUpdate={onNodeUpdate}
                 />
               );
             })}

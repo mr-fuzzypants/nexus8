@@ -12,12 +12,14 @@ interface TreeTableRowProps {
   node: FlatTreeNode;
   virtualRow: VirtualItem;
   totalWidth: number;
+  onNodeUpdate?: (nodeId: string, field: string, value: any) => void;
 }
 
 export const TreeTableRow: React.FC<TreeTableRowProps> = ({ 
   node, 
   virtualRow,
-  totalWidth 
+  totalWidth,
+  onNodeUpdate
 }) => {
   const theme = useMantineTheme();
   const rowRef = useRef<HTMLDivElement>(null);
@@ -208,11 +210,11 @@ export const TreeTableRow: React.FC<TreeTableRowProps> = ({
                   </Box>
                 )}
                 <Box style={{ flex: 1, minWidth: 0, height: '100%' }}>
-                  <TreeTableCell node={node} column={colDef} value={value} />
+                  <TreeTableCell node={node} column={colDef} value={value} onUpdate={onNodeUpdate} />
                 </Box>
               </div>
             ) : (
-              <TreeTableCell node={node} column={colDef} value={value} />
+              <TreeTableCell node={node} column={colDef} value={value} onUpdate={onNodeUpdate} />
             )}
           </Box>
         );
