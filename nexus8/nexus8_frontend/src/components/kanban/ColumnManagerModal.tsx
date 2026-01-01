@@ -44,15 +44,18 @@ const DraggableColumnItem = ({
   kanbanSchema: any
 }) => {
   const ref = useRef<HTMLDivElement>(null);
+  const dragHandleRef = useRef<HTMLButtonElement>(null);
   const [closestEdge, setClosestEdge] = useState<Edge | null>(null);
 
   useEffect(() => {
     const element = ref.current;
-    if (!element) return;
+    const dragHandle = dragHandleRef.current;
+    if (!element || !dragHandle) return;
 
     return combine(
       draggable({
         element,
+        dragHandle,
         getInitialData: () => ({ type: 'column-manager-item', index, id: status.id }),
       }),
       dropTargetForElements({
@@ -85,7 +88,12 @@ const DraggableColumnItem = ({
         }}>
         <Group justify="space-between">
           <Group gap="sm">
-            <ActionIcon variant="subtle" size="sm" style={{ cursor: 'grab' }}>
+            <ActionIcon 
+              ref={dragHandleRef}
+              variant="subtle" 
+              size="sm" 
+              style={{ cursor: 'grab' }}
+            >
               <IconGripVertical size={16} />
             </ActionIcon>
             
@@ -186,7 +194,11 @@ export const ColumnManagerModal: React.FC<ColumnManagerProps> = ({ opened, onClo
 
         const edge = extractClosestEdge(destinationData);
         
-        const newStatuses = [...kanbanSchema.statuses];
+        // Create a deep copy and sort to match visual order
+        const newStatuses = kanbanSchema.statuses
+            .map(s => ({ ...s }))
+            .sort((a, b) => a.order - b.order);
+            
         const [movedStatus] = newStatuses.splice(sourceIndex, 1);
         
         let targetIndex = destinationIndex;
@@ -415,7 +427,10 @@ export const ColumnManagerModal: React.FC<ColumnManagerProps> = ({ opened, onClo
           <Divider />
 
           <Stack gap="sm">
-            {kanbanSchema.statuses.map((status, index) => (
+            {kanbanSchema.statuses
+              .slice()
+              .sort((a, b) => a.order - b.order)
+              .map((status, index) => (
               <DraggableColumnItem
                 key={status.id}
                 status={status}
