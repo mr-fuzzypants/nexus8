@@ -57,11 +57,16 @@ const applyUndoAction = (action: UndoableAction) => {
         
         // Restore to card order
         const path = deleted.data.path;
+        const status = deleted.data.status;
+        
         if (!draft.cardOrder[path]) {
-          draft.cardOrder[path] = [];
+          draft.cardOrder[path] = {};
         }
-        if (!draft.cardOrder[path].includes(deleted.id)) {
-          draft.cardOrder[path].push(deleted.id);
+        if (!draft.cardOrder[path][status]) {
+          draft.cardOrder[path][status] = [];
+        }
+        if (!draft.cardOrder[path][status].includes(deleted.id)) {
+          draft.cardOrder[path][status].push(deleted.id);
         }
         
         // Restore parent relationship
@@ -97,9 +102,12 @@ const applyUndoAction = (action: UndoableAction) => {
   // Handle order changes - reverse them
   if (diff.orderChanges) {
     diff.orderChanges.forEach((orderChange) => {
-      if (orderChange.oldOrder) {
+      if (orderChange.oldOrder && orderChange.status) {
         useKanbanStore.setState((draft) => {
-          draft.cardOrder[orderChange.path] = orderChange.oldOrder!;
+          if (!draft.cardOrder[orderChange.path]) {
+            draft.cardOrder[orderChange.path] = {};
+          }
+          draft.cardOrder[orderChange.path][orderChange.status!] = orderChange.oldOrder!;
         });
       }
     });
@@ -122,11 +130,16 @@ const applyRedoAction = (action: UndoableAction) => {
         
         // Add to card order
         const path = created.data.path || 'root';
+        const status = created.data.status;
+        
         if (!draft.cardOrder[path]) {
-          draft.cardOrder[path] = [];
+          draft.cardOrder[path] = {};
         }
-        if (!draft.cardOrder[path].includes(created.id)) {
-          draft.cardOrder[path].push(created.id);
+        if (!draft.cardOrder[path][status]) {
+          draft.cardOrder[path][status] = [];
+        }
+        if (!draft.cardOrder[path][status].includes(created.id)) {
+          draft.cardOrder[path][status].push(created.id);
         }
         
         // Update parent if exists
@@ -169,9 +182,12 @@ const applyRedoAction = (action: UndoableAction) => {
   // Handle order changes - reapply them
   if (diff.orderChanges) {
     diff.orderChanges.forEach((orderChange) => {
-      if (orderChange.newOrder) {
+      if (orderChange.newOrder && orderChange.status) {
         useKanbanStore.setState((draft) => {
-          draft.cardOrder[orderChange.path] = orderChange.newOrder!;
+          if (!draft.cardOrder[orderChange.path]) {
+            draft.cardOrder[orderChange.path] = {};
+          }
+          draft.cardOrder[orderChange.path][orderChange.status!] = orderChange.newOrder!;
         });
       }
     });

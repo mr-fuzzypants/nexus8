@@ -562,6 +562,14 @@ export const useKanbanStore = create<KanbanState>()(
           },
           
           deleteCard: (id) => {
+            const state = get();
+            const card = state.cards[id];
+            if (!card) return;
+            
+            const path = card.path;
+            const status = card.status;
+            const oldOrder = state.cardOrder[path]?.[status] ? [...state.cardOrder[path][status]] : [];
+
             set((draft) => {
               const card = draft.cards[id];
               if (!card) return;
@@ -596,6 +604,29 @@ export const useKanbanStore = create<KanbanState>()(
                 draft.selection.selectedCardPath = undefined;
               }
             });
+            
+            // Record action
+            const newState = get();
+            const newOrder = newState.cardOrder[path]?.[status] || [];
+            
+            useUndoRedoStore.getState().recordAction({
+              type: 'DELETE_CARD',
+              description: `Delete card: ${card.title}`,
+              diff: {
+                deleted: [{
+                  id: card.id,
+                  data: card,
+                }],
+                orderChanges: [{
+                  path,
+                  status,
+                  oldOrder,
+                  newOrder
+                }]
+              },
+              cardIds: [id],
+              metadata: { title: card.title },
+            });
           },
           
           duplicateCard: (id) => {
@@ -615,12 +646,20 @@ export const useKanbanStore = create<KanbanState>()(
           },
           
           moveCard: (cardId, newStatus, newIndex) => {
+            const state = get();
+            const card = state.cards[cardId];
+            if (!card) return;
+            
+            const path = card.path;
+            const oldStatus = card.status;
+            
+            // Capture state before change
+            const oldOrderSource = state.cardOrder[path]?.[oldStatus] ? [...state.cardOrder[path][oldStatus]] : [];
+            const oldOrderDest = oldStatus === newStatus ? oldOrderSource : (state.cardOrder[path]?.[newStatus] ? [...state.cardOrder[path][newStatus]] : []);
+
             set((draft) => {
               const card = draft.cards[cardId];
               if (!card) return;
-              
-              const path = card.path;
-              const oldStatus = card.status;
               
               // Initialize structures if needed
               if (!draft.cardOrder[path]) {
@@ -648,6 +687,50 @@ export const useKanbanStore = create<KanbanState>()(
               // Update card status
               card.status = newStatus;
               card.updatedAt = new Date().toISOString();
+            });
+            
+            // Capture state after change
+            const newState = get();
+            const newOrderSource = newState.cardOrder[path]?.[oldStatus] || [];
+            const newOrderDest = newState.cardOrder[path]?.[newStatus] || [];
+            
+            // Record action
+            const orderChanges: any[] = [];
+            
+            if (oldStatus === newStatus) {
+               // Reordering within same list
+               orderChanges.push({
+                 path,
+                 status: oldStatus,
+                 oldOrder: oldOrderSource,
+                 newOrder: newOrderSource
+               });
+            } else {
+               // Moving between lists
+               orderChanges.push({
+                 path,
+                 status: oldStatus,
+                 oldOrder: oldOrderSource,
+                 newOrder: newOrderSource
+               });
+               orderChanges.push({
+                 path,
+                 status: newStatus,
+                 oldOrder: oldOrderDest,
+                 newOrder: newOrderDest
+               });
+            }
+            
+            useUndoRedoStore.getState().recordAction({
+              type: 'MOVE_CARD',
+              description: `Move card to ${newStatus}`,
+              diff: {
+                cardChanges: oldStatus !== newStatus ? {
+                  [cardId]: [{ field: 'status', oldValue: oldStatus, newValue: newStatus }]
+                } : undefined,
+                orderChanges
+              },
+              cardIds: [cardId],
             });
           },
           

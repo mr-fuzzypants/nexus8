@@ -11,6 +11,8 @@ import {
   Box,
   NumberInput,
   Select,
+  Slider,
+  Button,
 } from '@mantine/core';
 import {
   IconSettings,
@@ -18,7 +20,12 @@ import {
   IconBug,
   IconPalette,
   IconLayout,
+  IconRefresh,
 } from '@tabler/icons-react';
+import { shallow } from 'zustand/shallow';
+import { useKanbanStore } from '../../state';
+
+import { ScaleControls } from './ScaleControls';
 
 interface SettingsModalProps {
   opened: boolean;
@@ -162,6 +169,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </Stack>
             </Box>
             
+            <Divider />
+            
+            <Box>
+              <Text size="sm" fw={500} mb="xs">Scaling</Text>
+              <ScaleControls />
+            </Box>
+
             <Divider />
             
             <Box>

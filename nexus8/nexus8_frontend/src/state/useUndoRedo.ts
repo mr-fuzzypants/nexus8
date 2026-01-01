@@ -30,6 +30,7 @@ export interface StateDiff {
   // Card order changes
   orderChanges?: Array<{
     path: string;
+    status?: string; // Added status to support per-status ordering
     oldIndex?: number;
     newIndex?: number;
     oldOrder?: string[];

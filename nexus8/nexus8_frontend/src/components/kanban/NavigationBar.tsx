@@ -20,6 +20,7 @@ import {
   IconSettings,
   IconArrowBackUp,
   IconArrowForwardUp,
+  IconLayout,
 } from '@tabler/icons-react';
 import { useKanbanStore } from '../../state';
 import { useUndoRedo } from '../../state/useUndoRedo';
@@ -153,6 +154,15 @@ export const NavigationBar: React.FC<NavigationBarProps> = ({
             <ActionIcon
               variant="light"
               onClick={() => setColumnManagerOpened(true)}
+            >
+              <IconLayout size={16} />
+            </ActionIcon>
+          </Tooltip>
+
+          <Tooltip label="Global Settings">
+            <ActionIcon
+              variant="light"
+              onClick={() => actions.openSettings()}
             >
               <IconSettings size={16} />
             </ActionIcon>
