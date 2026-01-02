@@ -95,13 +95,7 @@ export const KanbanColumn = React.memo(({ status, isAggregate, onAddChild, onCar
   };
   
   const handleDuplicate = (card: KanbanCardType) => {
-    dataActions.addCard({
-      ...card,
-      id: uuidv4(),
-      title: `${card.title} (Copy)`,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
+    dataActions.duplicateCard(card.id);
   };
 
   const handleDelete = (card: KanbanCardType) => dataActions.deleteCard(card.id);
