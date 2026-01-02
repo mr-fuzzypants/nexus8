@@ -15,7 +15,10 @@ export type UndoableActionType =
   | 'BULK_MOVE'
   | 'NAVIGATE'
   | 'FILTER_CHANGE'
-  | 'SCHEMA_UPDATE';
+  | 'SCHEMA_UPDATE'
+  | 'ADD_COLUMN'
+  | 'DELETE_COLUMN'
+  | 'MOVE_COLUMN';
 
 // State Diff - stores only what changed
 export interface StateDiff {
@@ -26,6 +29,15 @@ export interface StateDiff {
       oldValue: any;
       newValue: any;
     }>;
+  },
+     // Add schema changes specifically for columns
+  columnChanges?: {
+    added?: any[];   // Array of column definitions
+    deleted?: any[]; // Array of column definitions
+    moved?: {        // For reordering
+      oldIndex: number;
+      newIndex: number;
+    };
   };
   // Card order changes
   orderChanges?: Array<{
@@ -237,6 +249,11 @@ const getActionDescription = (type: UndoableActionType, metadata?: Record<string
       return `Change filters`;
     case 'SCHEMA_UPDATE':
       return `Update ${metadata?.schemaType || 'schema'}`;
+    case 'ADD_COLUMN':
+      // this might be return `Add column: ${metadata?.title}`;
+      return `Add column: ${metadata?.columnName || 'Unknown'}`;
+    case 'DELETE_COLUMN':
+      return `Delete column: ${metadata?.columnName || 'Unknown'}`;
     default:
       return 'Unknown action';
   }
@@ -295,6 +312,9 @@ export const useUndoRedoStore = create<UndoRedoState>()(
         'BULK_DELETE',
         'BULK_MOVE',
         'SCHEMA_UPDATE',
+        'ADD_COLUMN',
+        'DELETE_COLUMN',
+        'MOVE_COLUMN',
       ]),
       
       groupingTimeWindow: 1000, // 1 second

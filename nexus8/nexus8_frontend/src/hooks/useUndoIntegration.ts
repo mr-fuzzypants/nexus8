@@ -124,6 +124,37 @@ const applyUndoAction = (action: UndoableAction) => {
       }
     });
   }
+
+  // Handle column changes - reverse them
+  if (diff.columnChanges) {
+    // Undo ADD_COLUMN -> Delete it
+    if (diff.columnChanges.added && diff.columnChanges.added.length > 0) {
+        const colId = diff.columnChanges.added[0].id;
+        useDataStore.setState((draft) => {
+            draft.kanbanSchema.statuses = draft.kanbanSchema.statuses.filter(s => s.id !== colId);
+        });
+    }
+    
+    // Undo DELETE_COLUMN -> Add it back
+    if (diff.columnChanges.deleted && diff.columnChanges.deleted.length > 0) {
+        const col = diff.columnChanges.deleted[0];
+        useDataStore.setState((draft) => {
+            draft.kanbanSchema.statuses.push(col);
+            draft.kanbanSchema.statuses.sort((a, b) => a.order - b.order);
+        });
+    }
+
+    // Undo MOVE_COLUMN -> Revert order
+    if (diff.columnChanges.moved) {
+        const { oldIndex, newIndex } = diff.columnChanges.moved;
+        useDataStore.setState((draft) => {
+            const statuses = draft.kanbanSchema.statuses.sort((a, b) => a.order - b.order);
+            const [moved] = statuses.splice(newIndex, 1);
+            statuses.splice(oldIndex, 0, moved);
+            statuses.forEach((s, i) => s.order = i);
+        });
+    }
+  }
 };
 
 /**
@@ -215,5 +246,36 @@ const applyRedoAction = (action: UndoableAction) => {
          });
       }
     });
+  }
+
+  // Handle column changes - reapply them
+  if (diff.columnChanges) {
+    // Redo ADD_COLUMN -> Add it back
+    if (diff.columnChanges.added && diff.columnChanges.added.length > 0) {
+        const col = diff.columnChanges.added[0];
+        useDataStore.setState((draft) => {
+            draft.kanbanSchema.statuses.push(col);
+            draft.kanbanSchema.statuses.sort((a, b) => a.order - b.order);
+        });
+    }
+    
+    // Redo DELETE_COLUMN -> Delete it again
+    if (diff.columnChanges.deleted && diff.columnChanges.deleted.length > 0) {
+        const colId = diff.columnChanges.deleted[0].id;
+        useDataStore.setState((draft) => {
+            draft.kanbanSchema.statuses = draft.kanbanSchema.statuses.filter(s => s.id !== colId);
+        });
+    }
+
+    // Redo MOVE_COLUMN -> Reapply new order
+    if (diff.columnChanges.moved) {
+        const { oldIndex, newIndex } = diff.columnChanges.moved;
+        useDataStore.setState((draft) => {
+            const statuses = draft.kanbanSchema.statuses.sort((a, b) => a.order - b.order);
+            const [moved] = statuses.splice(oldIndex, 1);
+            statuses.splice(newIndex, 0, moved);
+            statuses.forEach((s, i) => s.order = i);
+        });
+    }
   }
 };
