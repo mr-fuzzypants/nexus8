@@ -156,9 +156,9 @@ const flattenTree = <T>(
   nodes: TreeNode<T>[], 
   expandedIds: Set<string>, 
   depth = 0, 
-  parentId: string | null = null
+  parentId: string | null = null,
+  result: FlatTreeNode<T>[] = []
 ): FlatTreeNode<T>[] => {
-  let result: FlatTreeNode<T>[] = [];
   
   for (const node of nodes) {
     const isExpanded = expandedIds.has(node.id);
@@ -176,10 +176,7 @@ const flattenTree = <T>(
     result.push(flatNode);
     
     if (hasChildren && isExpanded) {
-      result = [
-        ...result,
-        ...flattenTree(node.children!, expandedIds, depth + 1, node.id)
-      ];
+      flattenTree(node.children!, expandedIds, depth + 1, node.id, result);
     }
   }
   
@@ -228,7 +225,7 @@ export const useTreeGridStore = create<TreeGridState>((set, get) => ({
     }, {} as Record<string, number>);
     
     const columnVisibility = schema.columns.reduce((acc, col) => {
-      acc[col.id] = col.visible !== false;
+      acc[col.id] = !col.hidden;
       return acc;
     }, {} as Record<string, boolean>);
     
@@ -275,12 +272,11 @@ export const useTreeGridStore = create<TreeGridState>((set, get) => ({
     const groupedData = groupRoots(rawData, groupBy);
     const sortedData = sortTree(groupedData, sortConfig);
     
-    const collectIds = (nodes: TreeNode[]): string[] => {
-      let ids: string[] = [];
+    const collectIds = (nodes: TreeNode[], ids: string[] = []): string[] => {
       for (const node of nodes) {
         if (node.children && node.children.length > 0) {
           ids.push(node.id);
-          ids = [...ids, ...collectIds(node.children)];
+          collectIds(node.children, ids);
         }
       }
       return ids;

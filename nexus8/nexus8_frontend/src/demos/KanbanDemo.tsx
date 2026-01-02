@@ -31,7 +31,13 @@ export function KanbanDemo() {
   useUndoIntegration();
 
   // Convert cards to tree nodes for TreeTable
-  const treeData = useMemo(() => convertCardsToTreeNodes(cards), [cards]);
+  // Optimization: Only calculate tree data when the TreeTable tab is active
+  const treeData = useMemo(() => {
+    if (activeTab !== 'treetable') {
+      return [];
+    }
+    return convertCardsToTreeNodes(cards);
+  }, [cards, activeTab]);
 
   useEffect(() => {
     // Only initialize if empty

@@ -14,7 +14,7 @@ export const TreeTableHeader: React.FC<TreeTableHeaderProps> = ({ totalWidth }) 
     columnVisibility
   } = useTreeGridStore();
 
-  const reorderEnabled = schema.columnReordering?.enabled ?? true;
+  const reorderEnabled = schema.options?.enableColumnReordering ?? true;
 
   let currentLeft = 0;
 

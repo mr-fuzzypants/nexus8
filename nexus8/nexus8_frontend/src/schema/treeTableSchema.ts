@@ -81,8 +81,6 @@ export const TreeTableSchema = z.object({
 
 export type TreeTableSchema = z.infer<typeof TreeTableSchema>;
 
-export type TreeTableSchema = z.infer<typeof TreeTableSchema>;
-
 // Default Schema
 export const defaultTreeTableSchema = TreeTableSchema.parse({
   version: TREE_TABLE_SCHEMA_VERSION,
