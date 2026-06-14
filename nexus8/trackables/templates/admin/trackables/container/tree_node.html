@@ -1,0 +1,30 @@
+{% load admin_urls %}
+
+<div class="tree-node">
+    <div class="tree-node-content">
+        <span class="tree-indent">
+            {% for i in "x"|rjust:depth %}└─ {% endfor %}
+        </span>
+        
+        <a href="{% url 'admin:trackables_container_change' node.container.id %}" 
+           class="container-link depth-{{ depth }}">
+            {{ node.container.code }}
+        </a>
+        
+        <span class="container-info">
+            ({{ node.container.name }})
+            {% if node.container.versions.count %}
+                - {{ node.container.versions.count }} versions
+            {% endif %}
+            {% if node.children %}
+                - {{ node.children|length }} children
+            {% endif %}
+        </span>
+    </div>
+    
+    {% if node.children %}
+        {% for child in node.children %}
+            {% include "admin/trackables/container/tree_node.html" with node=child depth=depth|add:1 %}
+        {% endfor %}
+    {% endif %}
+</div>

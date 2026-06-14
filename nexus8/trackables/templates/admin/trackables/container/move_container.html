@@ -1,0 +1,89 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+<a href="{% url 'admin:index' %}">{% trans 'Home' %}</a>
+&rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+&rsaquo; <a href="{% url 'admin:trackables_container_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+&rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="content-main">
+    <h1>{{ title }}</h1>
+    
+    <div class="module aligned">
+        <h2>Container Information</h2>
+        <div class="form-row">
+            <div><strong>Code:</strong> {{ container.code }}</div>
+            <div><strong>Name:</strong> {{ container.name }}</div>
+            <div><strong>Current Parent:</strong> 
+                {% if container.parent_container %}
+                    <a href="{% url 'admin:trackables_container_change' container.parent_container.id %}">
+                        {{ container.parent_container.code }}
+                    </a>
+                {% else %}
+                    Root Level
+                {% endif %}
+            </div>
+            <div><strong>Hierarchy Path:</strong> {{ container.get_hierarchy_path|join:" → " }}</div>
+            <div><strong>Descendants:</strong> {{ container.get_descendants_by_path.count }} containers will be affected</div>
+        </div>
+    </div>
+    
+    <form method="post">
+        {% csrf_token %}
+        
+        <div class="module aligned">
+            <h2>Move Container</h2>
+            
+            <div class="form-row">
+                <div>
+                    <label for="new_parent_id"><strong>New Parent Container:</strong></label>
+                    <select name="new_parent_id" id="new_parent_id">
+                        <option value="">-- Root Level --</option>
+                        {% for parent in potential_parents %}
+                            <option value="{{ parent.id }}"
+                                {% if parent.id == container.parent_container.id %}selected{% endif %}>
+                                {{ parent.get_hierarchy_path|join:" → " }} ({{ parent.code }})
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            
+            <div class="form-row">
+                <div class="help">
+                    <p><strong>Note:</strong> Moving this container will also move all its descendants.</p>
+                    <p>The materialized path will be automatically updated for the entire subtree.</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="submit-row">
+            <input type="submit" value="Move Container" class="default" />
+            <a href="{% url 'admin:trackables_container_change' container.id %}" class="button cancel-link">Cancel</a>
+        </div>
+    </form>
+</div>
+
+<style>
+.help {
+    color: #666;
+    font-size: 11px;
+    margin-top: 10px;
+}
+
+.form-row > div {
+    margin-bottom: 8px;
+}
+
+select {
+    width: 400px;
+}
+</style>
+{% endblock %}

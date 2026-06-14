@@ -1,0 +1,51 @@
+{
+  "name": "web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "relay": "COLLAB_STORAGE_DRIVER=${COLLAB_STORAGE_DRIVER:-postgres} DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/nexus8} node relay/yjs-websocket-server.mjs"
+  },
+  "dependencies": {
+    "@mantine/core": "^9.3.1",
+    "@mantine/dropzone": "^9.3.1",
+    "@mantine/hooks": "^9.3.1",
+    "@stroke-stabilizer/core": "^0.3.1",
+    "@tabler/icons-react": "^3.44.0",
+    "@tanstack/react-query": "^5.101.0",
+    "@tanstack/react-virtual": "^3.14.2",
+    "axios": "^1.17.0",
+    "clsx": "^2.1.1",
+    "konva": "^10.3.0",
+    "lucide-react": "^0.577.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "react-konva": "^19.2.5",
+    "simplify-js": "^1.2.4",
+    "wouter": "^3.10.0",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.27",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.12.3",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.0.1",
+    "eslint": "^10.3.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.6.0",
+    "pg": "^8.20.0",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.59.2",
+    "vite": "^8.0.12",
+    "ws": "^8.19.0"
+  }
+}

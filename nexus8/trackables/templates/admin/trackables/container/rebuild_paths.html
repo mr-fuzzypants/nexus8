@@ -1,0 +1,66 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls static %}
+
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+<a href="{% url 'admin:index' %}">{% trans 'Home' %}</a>
+&rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+&rsaquo; <a href="{% url 'admin:trackables_container_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+&rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="content-main">
+    <h1>{{ title }}</h1>
+    
+    <div class="module aligned">
+        <h2>System Information</h2>
+        <div class="form-row">
+            <div><strong>Total Containers:</strong> {{ container_count }}</div>
+            <div><strong>Operation:</strong> Rebuild all materialized path fields (path, depth, path_ids)</div>
+        </div>
+    </div>
+    
+    <div class="module aligned">
+        <h2>Warning</h2>
+        <div class="form-row">
+            <div style="color: #cc3300; font-weight: bold;">
+                This operation will update all container records in the database.
+            </div>
+            <div style="margin-top: 10px;">
+                <ul>
+                    <li>This may take several minutes for large datasets</li>
+                    <li>The operation runs in a single transaction</li>
+                    <li>All materialized path fields will be recalculated</li>
+                    <li>Use this after bulk imports or data migrations</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    
+    <form method="post">
+        {% csrf_token %}
+        
+        <div class="submit-row">
+            <input type="submit" 
+                   value="Rebuild Materialized Paths" 
+                   class="default"
+                   onclick="return confirm('Are you sure you want to rebuild all materialized paths? This operation cannot be undone.');" />
+            <a href="{% url 'admin:trackables_container_changelist' %}" class="button cancel-link">Cancel</a>
+        </div>
+    </form>
+</div>
+
+<style>
+.form-row > div {
+    margin-bottom: 8px;
+}
+
+ul {
+    margin-left: 20px;
+}
+</style>
+{% endblock %}

@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/robertpringle/development/nexus8/.venv/bin/python manage.py migrate)",
+      "Bash(/Users/robertpringle/development/nexus8/.venv/bin/python -m py_compile trackables/management/commands/analyze_assets.py trackables/examples.py trackables/views.py trackables/serializers.py trackables/admin.py trackables/models/*.py)",
+      "Bash(/Users/robertpringle/development/nexus8/.venv/bin/python manage.py check)",
+      "Bash(/Users/robertpringle/development/nexus8/.venv/bin/python manage.py test trackables -v 1)",
+      "Bash(sed -i '' 's|all-entities|all-versioned-entities|g' /tmp/smoke_test.py)",
+      "Bash(/Users/robertpringle/development/nexus8/.venv/bin/python /tmp/smoke_test.py)",
+      "Bash(sed -i '' 's|^import django, os|import sys; sys.path.insert\\(0, \"/Users/robertpringle/development/nexus8/nexus8\"\\)\\\\nimport django, os|' /tmp/smoke_test.py && /Users/robertpringle/development/nexus8/.venv/bin/python /tmp/smoke_test.py 2>&1 | tail -24)",
+      "Bash(/Users/robertpringle/development/nexus8/.venv/bin/python /tmp/cleanup_smoke.py)",
+      "Bash(/Users/robertpringle/development/nexus8/.venv/bin/python manage.py demo_cg_production)",
+      "Bash(/Users/robertpringle/development/nexus8/.venv/bin/python manage.py demo_ai_generation)",
+      "Bash(/Users/robertpringle/development/nexus8/.venv/bin/python manage.py test trackables)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp"
+    ]
+  }
+}
