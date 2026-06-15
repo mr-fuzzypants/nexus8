@@ -246,6 +246,55 @@ schema.
 
 ---
 
+### 5.10 Dependency & lineage graph (`<DependencyGraph>`) — impact analysis
+
+A scoped, directional **DAG** view answering two questions a list can't:
+"if I change this, what breaks?" (downstream) and "where did this come from?"
+(upstream provenance). This is distinct from the entity *relationship* view
+(§5.7) — that's a dense bipartite asset↔entity graph best left to faceted
+lists; this is a directed acyclic `uses`/`depends_on` graph that lays out
+cleanly in layers.
+
+**Why the data already fits.** `DependencyLink(source_version → target_version,
+relationship_type, role)` is an explicit edge table with a transitive-closure
+CTE (`get_all_dependencies_recursive`) and indexes tuned for both
+"what uses X?" and "what does X use?". The only gap is serialization: the
+existing `dependency_graph/` action returns *direct* deps as a nested object;
+a graph view needs a flat `{nodes, edges}` payload over the recursive closure.
+
+**Backend (one new action).** `GET /api/dependency-links/graph/?version_id=&
+direction=downstream|upstream|both&max_depth=` → recursive CTE in both
+directions, returning:
+
+```jsonc
+{
+  "root": "42",
+  "direction": "downstream",
+  "nodes": [{ "id": "42", "version_id": 42, "entity_id": 7,
+              "entity_name": "hero_model", "entity_type": "media_asset",
+              "version_number": 3 }],
+  "edges": [{ "id": "v42-v51-uses", "source": "42", "target": "51",
+              "relationship_type": "uses", "role": "texture" }],
+  "truncated": false   // true when max_depth was hit (more graph may exist)
+}
+```
+
+Depth-capped (default 10) via the existing `max_depth` guard; `truncated`
+surfaces silent cutoffs rather than implying full coverage.
+
+**Frontend.** `@xyflow/react v12 + dagre` (already in §2 stack). dagre `TB`
+layered layout — correct for a DAG, wrong for §5.7's bipartite graph. Nodes
+badged by `entity_type`, edges colored by `relationship_type`, labeled by
+`role`. Click a node → re-center the graph on it (expand-on-click); double-click
+→ navigate to its asset/entity. Direction toggle (uses ↔ used-by ↔ both).
+Lives as a **"Dependencies" tab in the asset panel** (§5.4) and standalone at
+`/graph/:versionId`.
+
+**Scope discipline:** read-mostly v1 (no drag-to-create-link yet);
+expand-on-click instead of rendering the full closure; `truncated` banner when
+capped. Container hierarchy stays in the tree UI; entity relations stay in
+faceted lists — neither becomes a graph.
+
 ## 6. Interaction & accessibility
 
 **Keyboard map:** `⌘K` search · `←→↑↓` grid navigation · `space` quick-look ·
@@ -333,7 +382,8 @@ populating facets; `EntityRelation` + entity hubs + structured query chips;
 smart collections.
 
 **Phase 4 — Depth & polish (ongoing)**
-Version trees + compare UI; entity relationship graph; recommendations/home
+Version trees + compare UI; dependency/impact graph (§5.10, `{nodes,edges}`
+endpoint + xyflow/dagre); entity relationship graph; recommendations/home
 discovery; discussions/tasks tabs; realtime (Channels); mobile pass;
 WCAG audit; 100k-asset load test.
 

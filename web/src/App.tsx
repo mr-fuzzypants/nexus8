@@ -7,6 +7,7 @@ import { BoardPage } from './features/boards/BoardPage';
 import { CollectionsPage } from './features/collections/CollectionsPage';
 import { EntitiesPage } from './features/entities/EntitiesPage';
 import { EntityPage } from './features/entities/EntityPage';
+import { GraphPage } from './features/graph/GraphPage';
 import { FavoritesPage } from './pages/FavoritesPage';
 import { RecentPage } from './pages/RecentPage';
 import { StubPage } from './pages/StubPage';
@@ -35,6 +36,7 @@ export default function App() {
             <Route path="/boards/:id" component={BoardPage} />
             <Route path="/entities" component={EntitiesPage} />
             <Route path="/entities/:id" component={EntityPage} />
+            <Route path="/graph/:versionId" component={GraphPage} />
             <Route>
               <StubPage title="Not found" note="This page does not exist." />
             </Route>

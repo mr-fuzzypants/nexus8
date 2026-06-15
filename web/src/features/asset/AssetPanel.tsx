@@ -16,6 +16,7 @@ import { useBasketStore } from '../../stores/basket';
 import { RelatedSection } from './RelatedSection';
 import { SimilarSection } from './SimilarSection';
 import { VersionsSection } from './VersionsSection';
+import { DependenciesSection } from './DependenciesSection';
 import { ActivitySection } from './ActivitySection';
 
 interface AssetPanelProps {
@@ -181,6 +182,7 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
           <RelatedSection asset={asset} />
           <SimilarSection asset={asset} onOpenAsset={(a) => onOpenAsset?.(a)} />
           <VersionsSection asset={asset} onAssetUpdated={(a) => onOpenAsset?.(a)} />
+          <DependenciesSection asset={asset} />
           <ActivitySection asset={asset} />
 
           <dl className="meta-grid">
