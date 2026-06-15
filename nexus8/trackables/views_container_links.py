@@ -4,6 +4,8 @@ from rest_framework import viewsets, status, permissions, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
+from django.db import connection
+from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 
@@ -12,6 +14,63 @@ from .serializers_container_links import (
     DependencyLinkSerializer,
     DependencyLinkMinimalSerializer,
 )
+
+
+def _dependency_edges(version_id, max_depth, direction):
+    """Recursively collect dependency edges around a version via CTE.
+
+    direction:
+      "downstream" — edges this version (transitively) uses/depends on
+      "upstream"   — edges that (transitively) use this version
+      "both"       — union of the two
+
+    Returns a list of (source_version_id, target_version_id, relationship_type,
+    role, depth) tuples. Edges are de-duplicated; `depth` is the shortest hop
+    count at which the edge was first reached.
+    """
+    # Each branch seeds from the focused version and walks the FK in the
+    # relevant direction, following target->source (downstream) or
+    # source->target (upstream) on each recursion step.
+    seeds = {
+        "downstream": "dl.source_version_id = %s",
+        "upstream": "dl.target_version_id = %s",
+    }
+    steps = {
+        "downstream": "dl.source_version_id = g.tgt",
+        "upstream": "dl.target_version_id = g.src",
+    }
+    branches = ["downstream", "upstream"] if direction == "both" else [direction]
+
+    edges = {}
+    with connection.cursor() as cursor:
+        for branch in branches:
+            cursor.execute(
+                f"""
+                WITH RECURSIVE g AS (
+                    SELECT dl.source_version_id AS src, dl.target_version_id AS tgt,
+                           dl.relationship_type, dl.role, 1 AS depth
+                    FROM trackables_dependencylink dl
+                    WHERE {seeds[branch]}
+
+                    UNION ALL
+
+                    SELECT dl.source_version_id, dl.target_version_id,
+                           dl.relationship_type, dl.role, g.depth + 1
+                    FROM trackables_dependencylink dl
+                    INNER JOIN g ON {steps[branch]}
+                    WHERE g.depth < %s
+                )
+                SELECT src, tgt, relationship_type, role, MIN(depth) AS depth
+                FROM g
+                GROUP BY src, tgt, relationship_type, role
+                """,
+                [version_id, max_depth],
+            )
+            for src, tgt, rel_type, role, depth in cursor.fetchall():
+                key = (src, tgt, rel_type)
+                if key not in edges or depth < edges[key][4]:
+                    edges[key] = (src, tgt, rel_type, role, depth)
+    return list(edges.values())
 
 
 class DependencyLinkPagination(PageNumberPagination):
@@ -171,6 +230,93 @@ class DependencyLinkViewSet(viewsets.ModelViewSet):
                 },
                 "direct_dependencies": dependencies,
                 "total": len(dependencies),
+            }
+        )
+
+    @action(detail=False, methods=["get"])
+    def graph(self, request):
+        """Flat {nodes, edges} dependency graph for client-side layout (xyflow).
+
+        Query: /api/dependency-links/graph/?version_id=123
+                 &direction=downstream|upstream|both&max_depth=10
+
+        Unlike `dependency_graph` (direct deps, nested), this walks the
+        transitive closure and returns a node/edge list ready for a graph view.
+        """
+        version_id = request.query_params.get("version_id")
+        if not version_id:
+            return Response(
+                {"error": "version_id required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        direction = request.query_params.get("direction", "downstream")
+        if direction not in ("downstream", "upstream", "both"):
+            return Response(
+                {"error": "direction must be downstream, upstream, or both"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        max_depth = min(int(request.query_params.get("max_depth", 10)), 25)
+
+        root = get_object_or_404(Version, pk=version_id)
+        edge_rows = _dependency_edges(root.id, max_depth, direction)
+
+        edges = [
+            {
+                "id": f"v{src}-v{tgt}-{rel_type}",
+                "source": str(src),
+                "target": str(tgt),
+                "relationship_type": rel_type,
+                "role": role,
+            }
+            for src, tgt, rel_type, role, _depth in edge_rows
+        ]
+
+        # Resolve every version touched by an edge (plus the root) in one query.
+        version_ids = {root.id}
+        for src, tgt, *_ in edge_rows:
+            version_ids.add(src)
+            version_ids.add(tgt)
+        # Direction-aware count of each node's *direct* neighbors, so the client
+        # can show an "expand (+N)" affordance on collapsed nodes without fetching
+        # them. Downstream counts outgoing edges; upstream incoming; both, either.
+        def _degree(field):
+            return dict(
+                DependencyLink.objects.filter(**{f"{field}_id__in": version_ids})
+                .values(f"{field}_id")
+                .annotate(c=Count("id"))
+                .values_list(f"{field}_id", "c")
+            )
+
+        out_deg = _degree("source_version") if direction in ("downstream", "both") else {}
+        in_deg = _degree("target_version") if direction in ("upstream", "both") else {}
+
+        def _child_count(vid):
+            return out_deg.get(vid, 0) + in_deg.get(vid, 0)
+
+        versions = Version.objects.filter(id__in=version_ids).select_related("entity")
+        nodes = [
+            {
+                "id": str(v.id),
+                "version_id": v.id,
+                "entity_id": v.entity.id,
+                "entity_name": v.entity.name,
+                "entity_type": v.entity.entity_type,
+                "version_number": v.version_number,
+                "child_count": _child_count(v.id),
+            }
+            for v in versions
+        ]
+
+        truncated = any(depth >= max_depth for *_, depth in edge_rows)
+
+        return Response(
+            {
+                "root": str(root.id),
+                "direction": direction,
+                "nodes": nodes,
+                "edges": edges,
+                "truncated": truncated,
             }
         )
 
