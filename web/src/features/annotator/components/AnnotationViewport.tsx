@@ -19,6 +19,7 @@ import {
 } from '../core/annotations/freehandPipeline'
 import type {
   AnnotationEntity,
+  AnnotationFrame,
   AnnotationGeometry,
   AnnotationTool,
   ParticipantState,
@@ -637,6 +638,23 @@ export function AnnotationViewport({
     }
   }
 
+  // Screen pixels covered by one frame-local unit, used to keep the freehand
+  // stabilizer/simplifier scale-invariant. Image frames are pixel-space already
+  // (return 1, preserving existing behaviour); world-anchored 3D frames use tiny
+  // world units, so we normalize to pixel-equivalent space for the pipeline.
+  function freehandCoordinateScale(frame: AnnotationFrame): number {
+    if (frame.space !== 'world3d') {
+      return 1
+    }
+    const origin = projectionHost.project(frame, { x: 0, y: 0 }, viewport)
+    const unit = projectionHost.project(frame, { x: 1, y: 0 }, viewport)
+    if (!origin || !unit) {
+      return 1
+    }
+    const pixels = Math.hypot(unit.x - origin.x, unit.y - origin.y)
+    return pixels > 1e-6 ? pixels : 1
+  }
+
   function beginDraft(tool: Exclude<AnnotationTool, 'select' | 'text'>, screenPoint: Vec2, timestamp: number) {
     const worldPoint = adapter.screenToWorld(screenPoint, viewport)
     if (!worldPoint) {
@@ -648,8 +666,9 @@ export function AnnotationViewport({
     if (tool === 'polygon') {
       return null
     }
+    const coordinateScale = freehandCoordinateScale(frame)
     if (tool === 'freehand') {
-      const pipeline = new FreehandStrokePipeline(freehandPipelineOptions)
+      const pipeline = new FreehandStrokePipeline(freehandPipelineOptions, coordinateScale)
       freehandPipelineRef.current = pipeline
       const initialPoints = pipeline.addPoint({ x: 0, y: 0, timestamp })
       return {
@@ -673,7 +692,7 @@ export function AnnotationViewport({
     }
 
     if (tool === 'brush') {
-      const pipeline = new FreehandStrokePipeline(freehandPipelineOptions)
+      const pipeline = new FreehandStrokePipeline(freehandPipelineOptions, coordinateScale)
       freehandPipelineRef.current = pipeline
       const initialPoints = pipeline.addPoint({ x: 0, y: 0, timestamp })
       return {

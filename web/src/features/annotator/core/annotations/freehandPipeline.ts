@@ -25,33 +25,50 @@ function dedupeConsecutivePoints(points: Vec2[]) {
 export class FreehandStrokePipeline {
   private readonly options: FreehandPipelineOptions
   private readonly pointer: StabilizedPointer | null
+  // Stabilization (one-euro velocity smoothing) and simplification both work in
+  // the coordinate space of the incoming points and are tuned for screen pixels.
+  // World-anchored (3D) frames feed tiny world-unit deltas, which would be
+  // over-smoothed and over-simplified (a curve flattens to a line). We scale
+  // input up to a pixel-equivalent space internally and scale results back out,
+  // so behaviour is identical regardless of the frame's world scale.
+  private readonly scale: number
   private readonly rawPoints: Vec2[] = []
   private previewPoints: Vec2[] = []
 
-  constructor(options: FreehandPipelineOptions) {
+  constructor(options: FreehandPipelineOptions, coordinateScale = 1) {
     this.options = options
+    this.scale = Number.isFinite(coordinateScale) && coordinateScale > 1e-9 ? coordinateScale : 1
     this.pointer = options.enableStabilizer
       ? new StabilizedPointer().addFilter(oneEuroFilter({ minCutoff: 1.0, beta: 0.007, dCutoff: 1.0 }))
       : null
   }
 
+  private unscale(points: Vec2[]): Vec2[] {
+    if (this.scale === 1) {
+      return points.map((point) => ({ x: point.x, y: point.y }))
+    }
+    return points.map((point) => ({ x: point.x / this.scale, y: point.y / this.scale }))
+  }
+
   addPoint(point: FreehandInputPoint) {
-    this.rawPoints.push({ x: point.x, y: point.y })
+    const scaledX = point.x * this.scale
+    const scaledY = point.y * this.scale
+    this.rawPoints.push({ x: scaledX, y: scaledY })
 
     if (!this.pointer) {
-      this.previewPoints = dedupeConsecutivePoints([...this.previewPoints, { x: point.x, y: point.y }])
-      return this.previewPoints
+      this.previewPoints = dedupeConsecutivePoints([...this.previewPoints, { x: scaledX, y: scaledY }])
+      return this.unscale(this.previewPoints)
     }
 
-    const next = this.pointer.process(point)
+    const next = this.pointer.process({ ...point, x: scaledX, y: scaledY })
     if (next) {
       this.previewPoints = dedupeConsecutivePoints([...this.previewPoints, { x: next.x, y: next.y }])
     }
-    return this.previewPoints
+    return this.unscale(this.previewPoints)
   }
 
   getPreviewPoints() {
-    return this.previewPoints.length > 0 ? this.previewPoints : this.rawPoints
+    return this.unscale(this.previewPoints.length > 0 ? this.previewPoints : this.rawPoints)
   }
 
   finish() {
@@ -72,7 +89,7 @@ export class FreehandStrokePipeline {
       finalPoints = [...this.rawPoints]
     }
 
-    return dedupeConsecutivePoints(finalPoints)
+    return this.unscale(dedupeConsecutivePoints(finalPoints))
   }
 }
 
