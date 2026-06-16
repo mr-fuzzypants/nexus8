@@ -2,7 +2,7 @@ import { useEffect, useState, type CSSProperties } from 'react'
 import { useLocation } from 'wouter'
 import { useQuery } from '@tanstack/react-query'
 import * as Y from 'yjs'
-import type { AssetSummary } from '../../api/library'
+import { assetIs3DModel, assetIsVideo, type AssetSummary } from '../../api/library'
 import { AnnotationViewport } from './components/AnnotationViewport'
 import {
   DEFAULT_FREEHAND_PIPELINE_OPTIONS,
@@ -31,16 +31,6 @@ import './annotator.css'
 
 const PROFILE_COLORS = ['#5eead4', '#f97316', '#60a5fa', '#f472b6', '#a78bfa', '#facc15']
 const PROFILE_STORAGE_KEY = 'nexus8-annotator-profile'
-const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v']
-
-function assetIsVideo(asset: AssetSummary) {
-  if (asset.media_type === 'video') {
-    return true
-  }
-  const path = (asset.file_path || '').toLowerCase()
-  return VIDEO_EXTENSIONS.some((extension) => path.endsWith(extension))
-}
-
 function hashString(value: string) {
   let hash = 0
   for (let i = 0; i < value.length; i += 1) {
@@ -166,22 +156,16 @@ function AnnotatorWorkspace({
   // Create the viewer adapter + collaboration room inside the effect so it is
   // StrictMode-safe (created and destroyed together, recreated on remount).
   const isVideo = assetIsVideo(asset)
+  const is3DModel = !isVideo && assetIs3DModel(asset)
 
   useEffect(() => {
-    // Video and image annotations share the same per-asset targetId so a single
-    // annotation doc round-trips regardless of which viewer opened it.
+    // Image, video, and 3D-model annotations share the same per-asset targetId so
+    // a single annotation doc round-trips regardless of which viewer opened it.
     const targetId = `asset-${asset.id}`
-    const adapter = isVideo
-      ? createVideoViewerAdapter(
-          [{ id: targetId, src: asset.file_path, label: asset.name }],
-          { targetId, frameRate: asset.fps ?? undefined },
-        )
-      : createTiledImageViewerAdapter({
-          imageUrl: asset.file_path,
-          targetId,
-          width: asset.width ?? undefined,
-          height: asset.height ?? undefined,
-        })
+    let disposed = false
+    let unsubStore = () => {}
+    let unsubParticipants = () => {}
+
     const room = new BroadcastCollaborationRoom(doc.room_id, profile)
     if (doc.doc_state) {
       try {
@@ -191,19 +175,51 @@ function AnnotatorWorkspace({
       }
     }
     room.setLocalProfile(profile)
-    setEngine({ room, adapter })
-    setSnapshot(room.store.getSnapshot())
-    setParticipants(room.getParticipants())
-    const unsubStore = room.store.subscribe(() => setSnapshot(room.store.getSnapshot()))
-    const unsubParticipants = room.subscribeParticipants(() => setParticipants(room.getParticipants()))
+
+    const attach = (adapter: ViewerAdapter) => {
+      if (disposed) {
+        return
+      }
+      setEngine({ room, adapter })
+      setSnapshot(room.store.getSnapshot())
+      setParticipants(room.getParticipants())
+      unsubStore = room.store.subscribe(() => setSnapshot(room.store.getSnapshot()))
+      unsubParticipants = room.subscribeParticipants(() => setParticipants(room.getParticipants()))
+    }
+
+    if (is3DModel) {
+      // three.js is heavy; load the 3D adapter (and three) only when a model is opened
+      // so image/video annotation keeps a lean bundle.
+      import('./core/viewers/threeModelViewerAdapter').then(({ createThreeModelViewerAdapter }) => {
+        attach(createThreeModelViewerAdapter({ src: asset.file_path, targetId, label: asset.name }))
+      })
+    } else if (isVideo) {
+      attach(
+        createVideoViewerAdapter(
+          [{ id: targetId, src: asset.file_path, label: asset.name }],
+          { targetId, frameRate: asset.fps ?? undefined },
+        ),
+      )
+    } else {
+      attach(
+        createTiledImageViewerAdapter({
+          imageUrl: asset.file_path,
+          targetId,
+          width: asset.width ?? undefined,
+          height: asset.height ?? undefined,
+        }),
+      )
+    }
+
     return () => {
+      disposed = true
       unsubStore()
       unsubParticipants()
       room.destroy()
       setEngine(null)
       setSnapshot(null)
     }
-  }, [asset.id, asset.file_path, asset.name, asset.width, asset.height, asset.fps, isVideo, doc.room_id, doc.doc_state, profile])
+  }, [asset.id, asset.file_path, asset.name, asset.width, asset.height, asset.fps, isVideo, is3DModel, doc.room_id, doc.doc_state, profile])
 
   if (!engine || !snapshot) {
     return (
@@ -292,8 +308,11 @@ function AnnotatorWorkspace({
         <div className="annotator-page__title">
           <h1>{asset.name}</h1>
           <span>
-            {isVideo ? 'Video annotation' : 'Image annotation'} · {asset.width ?? '?'} × {asset.height ?? '?'}
-            {isVideo && asset.fps ? ` · ${asset.fps.toFixed(2)} fps` : ''}
+            {is3DModel
+              ? '3D model annotation'
+              : isVideo
+                ? `Video annotation · ${asset.width ?? '?'} × ${asset.height ?? '?'}${asset.fps ? ` · ${asset.fps.toFixed(2)} fps` : ''}`
+                : `Image annotation · ${asset.width ?? '?'} × ${asset.height ?? '?'}`}
           </span>
         </div>
         <div className="annotator-page__participants">
@@ -312,7 +331,7 @@ function AnnotatorWorkspace({
             {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : 'Save'}
           </button>
           {/* Mask rasterization is a still-image operation; it ignores frame binding. */}
-          {!isVideo ? (
+          {!isVideo && !is3DModel ? (
             <button className="annotator-page__action" onClick={handleGenerateMask}>
               {maskState === 'working' ? 'Rendering…' : maskState === 'idle' ? 'Generate mask' : maskState}
             </button>
@@ -334,7 +353,7 @@ function AnnotatorWorkspace({
       </header>
 
       <AnnotationViewport
-        title={isVideo ? 'Frame-accurate video' : '2D tiled viewer'}
+        title={is3DModel ? '3D model viewer' : isVideo ? 'Frame-accurate video' : '2D tiled viewer'}
         adapter={adapter}
         room={room}
         annotations={snapshot.annotations}

@@ -9,7 +9,7 @@ import {
 } from '@tabler/icons-react';
 import { useLocation } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
-import { previewUrl, thumbUrl, type AssetSummary } from '../../api/library';
+import { assetIs3DModel, assetIsVideo, previewUrl, thumbUrl, type AssetSummary } from '../../api/library';
 import { listMasks } from '../annotator/annotatorApi';
 import { useLibraryStore } from '../../stores/library';
 import { useBasketStore } from '../../stores/basket';
@@ -148,14 +148,18 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
             </Badge>
           </Group>
 
-          {(asset.media_type === 'image' || asset.media_type === 'video') && (
+          {(asset.media_type === 'image' || assetIsVideo(asset) || assetIs3DModel(asset)) && (
             <Button
               variant="light"
               color="teal"
               leftSection={<IconPencil size={16} stroke={1.75} />}
               onClick={() => navigate(`~/p/${code}/annotate/${asset.id}`)}
             >
-              {asset.media_type === 'video' ? 'Annotate video' : 'Annotate & mask'}
+              {assetIs3DModel(asset)
+                ? 'Annotate 3D model'
+                : assetIsVideo(asset)
+                  ? 'Annotate video'
+                  : 'Annotate & mask'}
             </Button>
           )}
 

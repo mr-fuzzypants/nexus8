@@ -100,3 +100,24 @@ export function thumbUrl(asset: AssetSummary, displayWidth: number): string {
 export function previewUrl(asset: AssetSummary): string {
   return asset.thumbnails['1024'] ?? asset.file_path;
 }
+
+const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v'];
+const MODEL_MEDIA_TYPES = ['3d_model', 'geometry', 'mesh'];
+const MODEL_EXTENSIONS = ['.glb', '.gltf', '.fbx', '.obj', '.blend'];
+
+/** True for video assets (by media_type or file extension). */
+export function assetIsVideo(asset: AssetSummary): boolean {
+  if (asset.media_type === 'video') return true;
+  const path = (asset.file_path || '').toLowerCase();
+  return VIDEO_EXTENSIONS.some((extension) => path.endsWith(extension));
+}
+
+/**
+ * True for 3D model assets. Note generic uploads (e.g. .glb) ingest as
+ * media_type "file", so detection must also consider the file extension.
+ */
+export function assetIs3DModel(asset: AssetSummary): boolean {
+  if (MODEL_MEDIA_TYPES.includes((asset.media_type || '').toLowerCase())) return true;
+  const path = (asset.file_path || '').toLowerCase();
+  return MODEL_EXTENSIONS.some((extension) => path.endsWith(extension));
+}
