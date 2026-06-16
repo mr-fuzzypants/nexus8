@@ -6,7 +6,9 @@ import {
   GridHelper,
   Group,
   HemisphereLight,
+  Material,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
   PerspectiveCamera,
@@ -326,19 +328,33 @@ export function createThreeModelViewerAdapter(options: ThreeModelViewerOptions):
     return hit ? { x: hit.x, y: hit.y, z: hit.z } : null
   }
 
+  function makeWireframeMaterial() {
+    // Unlit material so the wireframe shows only geometry edges — no textures,
+    // no lighting/shading tinting the lines.
+    return new MeshBasicMaterial({ color: 0xffffff, wireframe: true })
+  }
+
   function applyRenderMode() {
     const wireframe = renderMode === 'wireframe'
     modelRoot?.traverse((object) => {
       if (!(object instanceof Mesh)) {
         return
       }
-      const materials = Array.isArray(object.material) ? object.material : [object.material]
-      materials.forEach((material) => {
-        if (material instanceof MeshStandardMaterial) {
-          material.wireframe = wireframe
-          material.needsUpdate = true
+      // Stash the original (shaded) material the first time we touch this mesh.
+      if (object.userData.shadedMaterial === undefined) {
+        object.userData.shadedMaterial = object.material
+      }
+      if (wireframe) {
+        if (object.userData.wireframeMaterial === undefined) {
+          const original = object.userData.shadedMaterial as Material | Material[]
+          object.userData.wireframeMaterial = Array.isArray(original)
+            ? original.map(() => makeWireframeMaterial())
+            : makeWireframeMaterial()
         }
-      })
+        object.material = object.userData.wireframeMaterial as Material | Material[]
+      } else {
+        object.material = object.userData.shadedMaterial as Material | Material[]
+      }
     })
   }
 
@@ -521,8 +537,23 @@ export function createThreeModelViewerAdapter(options: ThreeModelViewerOptions):
             modelRoot.traverse((object) => {
               if (object instanceof Mesh) {
                 object.geometry.dispose()
-                const materials = Array.isArray(object.material) ? object.material : [object.material]
-                materials.forEach((material) => material.dispose())
+                const seen = new Set<Material>()
+                ;[
+                  object.material,
+                  object.userData.shadedMaterial,
+                  object.userData.wireframeMaterial,
+                ].forEach((entry) => {
+                  if (!entry) {
+                    return
+                  }
+                  const materials = Array.isArray(entry) ? entry : [entry]
+                  materials.forEach((material: Material) => {
+                    if (!seen.has(material)) {
+                      seen.add(material)
+                      material.dispose()
+                    }
+                  })
+                })
               }
             })
             scene?.remove(modelRoot)

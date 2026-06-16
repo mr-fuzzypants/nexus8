@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import dagre from 'dagre';
 import { Background, Controls, ReactFlow, type Edge, type Node, Position } from '@xyflow/react';
-import { Group, Loader, SegmentedControl, Text } from '@mantine/core';
+import { ActionIcon, Group, Loader, SegmentedControl, Text, Tooltip } from '@mantine/core';
+import { IconArrowLeft } from '@tabler/icons-react';
 import '@xyflow/react/dist/style.css';
 import { getNeighbors, type GraphEdge, type GraphNode, type GraphDirection } from '../../api/graph';
 
@@ -205,10 +206,12 @@ export interface DependencyGraphProps {
   versionId: number;
   /** Double-clicking a node hands back its entity id (e.g. to navigate). */
   onOpenEntity?: (entityId: number) => void;
+  /** When provided, renders a back button in the top-left toolbar. */
+  onBack?: () => void;
   height?: number | string;
 }
 
-export function DependencyGraph({ versionId, onOpenEntity, height = '100%' }: DependencyGraphProps) {
+export function DependencyGraph({ versionId, onOpenEntity, onBack, height = '100%' }: DependencyGraphProps) {
   const qc = useQueryClient();
   const rootId = String(versionId);
 
@@ -293,6 +296,13 @@ export function DependencyGraph({ versionId, onOpenEntity, height = '100%' }: De
   return (
     <div style={{ width: '100%', height, position: 'relative' }}>
       <Group gap="xs" style={{ position: 'absolute', top: 12, left: 12, zIndex: 5 }}>
+        {onBack && (
+          <Tooltip label="Back">
+            <ActionIcon variant="default" size="md" onClick={onBack} aria-label="Back">
+              <IconArrowLeft size={17} stroke={1.75} />
+            </ActionIcon>
+          </Tooltip>
+        )}
         <SegmentedControl
           size="xs"
           value={direction}

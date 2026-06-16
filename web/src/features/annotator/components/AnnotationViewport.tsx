@@ -774,7 +774,16 @@ export function AnnotationViewport({
 
     if (hasBoundsGeometry(annotation.geometry)) {
       const bounds = normalizeBounds(annotation.geometry.start, annotation.geometry.end)
-      if (Math.abs(bounds.maxX - bounds.minX) < 0.4 || Math.abs(bounds.maxY - bounds.minY) < 0.4) {
+      // The degenerate-shape threshold is in screen pixels. Bounds are in
+      // frame-local units (image pixels for 2D, but world units for 3D, where a
+      // visibly-large shape spans only a fraction of a unit). Scale local size
+      // up to screen pixels so the guard means the same thing in both spaces;
+      // freehandCoordinateScale() returns 1 for 2D, preserving prior behaviour.
+      const scale = freehandCoordinateScale(annotation.frame)
+      if (
+        Math.abs(bounds.maxX - bounds.minX) * scale < 0.4
+        || Math.abs(bounds.maxY - bounds.minY) * scale < 0.4
+      ) {
         return
       }
     }
