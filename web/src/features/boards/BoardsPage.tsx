@@ -3,14 +3,16 @@ import { useLocation } from 'wouter';
 import { Button, Text } from '@mantine/core';
 import { IconLayoutBoard, IconPlus } from '@tabler/icons-react';
 import { createBoard, listBoards } from '../../api/boards';
+import { useProject } from '../projects/ProjectContext';
 
 export function BoardsPage() {
   const [, navigate] = useLocation();
+  const { code } = useProject();
   const queryClient = useQueryClient();
-  const boards = useQuery({ queryKey: ['boards'], queryFn: listBoards });
+  const boards = useQuery({ queryKey: ['boards', code], queryFn: () => listBoards(code) });
 
   const newBoard = useMutation({
-    mutationFn: () => createBoard('Untitled board'),
+    mutationFn: () => createBoard('Untitled board', undefined, code),
     onSuccess: (board) => {
       queryClient.invalidateQueries({ queryKey: ['boards'] });
       navigate(`/boards/${board.id}`);

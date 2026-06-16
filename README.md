@@ -7,6 +7,7 @@ asset analysis.
 
 - **Product plan:** [REFERENCE_PLATFORM_PLAN.md](REFERENCE_PLATFORM_PLAN.md)
 - **End-user guide:** [USER_GUIDE.md](USER_GUIDE.md)
+- **Search internals & tuning:** [SEARCH.md](SEARCH.md)
 - **API examples:** [API_EXAMPLES.md](API_EXAMPLES.md)
 - **Frontend details:** [web/README.md](web/README.md)
 

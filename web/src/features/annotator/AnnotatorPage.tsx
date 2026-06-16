@@ -17,6 +17,7 @@ import type {
 import { BroadcastCollaborationRoom } from './core/collaboration/broadcast'
 import type { ViewerAdapter } from './core/viewers/adapters'
 import { createTiledImageViewerAdapter } from './core/viewers/tiledImageAdapter'
+import { createVideoViewerAdapter } from './core/viewers/videoAdapter'
 import {
   getAsset,
   getOrCreateAnnotationDoc,
@@ -30,6 +31,15 @@ import './annotator.css'
 
 const PROFILE_COLORS = ['#5eead4', '#f97316', '#60a5fa', '#f472b6', '#a78bfa', '#facc15']
 const PROFILE_STORAGE_KEY = 'nexus8-annotator-profile'
+const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v']
+
+function assetIsVideo(asset: AssetSummary) {
+  if (asset.media_type === 'video') {
+    return true
+  }
+  const path = (asset.file_path || '').toLowerCase()
+  return VIDEO_EXTENSIONS.some((extension) => path.endsWith(extension))
+}
 
 function hashString(value: string) {
   let hash = 0
@@ -87,9 +97,10 @@ function toBase64(data: Uint8Array) {
   return btoa(binary)
 }
 
-export default function AnnotatorPage({ params }: { params: { assetId: string } }) {
+export default function AnnotatorPage({ params }: { params: { code: string; assetId: string } }) {
   const assetId = Number(params.assetId)
   const [, navigate] = useLocation()
+  const back = () => navigate(`/p/${params.code}`)
 
   const assetQuery = useQuery({
     queryKey: ['annotator', 'asset', assetId],
@@ -105,7 +116,7 @@ export default function AnnotatorPage({ params }: { params: { assetId: string } 
   if (assetQuery.isLoading || docQuery.isLoading) {
     return (
       <div className="annotator-page">
-        <button className="annotator-page__action" onClick={() => navigate('/')}>
+        <button className="annotator-page__action" onClick={back}>
           ← Back
         </button>
         <p style={{ color: 'rgba(226,232,240,0.7)' }}>Loading annotator…</p>
@@ -116,7 +127,7 @@ export default function AnnotatorPage({ params }: { params: { assetId: string } 
   if (assetQuery.isError || !assetQuery.data || docQuery.isError || !docQuery.data) {
     return (
       <div className="annotator-page">
-        <button className="annotator-page__action" onClick={() => navigate('/')}>
+        <button className="annotator-page__action" onClick={back}>
           ← Back
         </button>
         <p style={{ color: '#fda4af' }}>Could not load this asset for annotation.</p>
@@ -124,7 +135,7 @@ export default function AnnotatorPage({ params }: { params: { assetId: string } 
     )
   }
 
-  return <AnnotatorWorkspace asset={assetQuery.data} doc={docQuery.data} onBack={() => navigate('/')} />
+  return <AnnotatorWorkspace asset={assetQuery.data} doc={docQuery.data} onBack={back} />
 }
 
 function AnnotatorWorkspace({
@@ -154,13 +165,23 @@ function AnnotatorWorkspace({
 
   // Create the viewer adapter + collaboration room inside the effect so it is
   // StrictMode-safe (created and destroyed together, recreated on remount).
+  const isVideo = assetIsVideo(asset)
+
   useEffect(() => {
-    const adapter = createTiledImageViewerAdapter({
-      imageUrl: asset.file_path,
-      targetId: `asset-${asset.id}`,
-      width: asset.width ?? undefined,
-      height: asset.height ?? undefined,
-    })
+    // Video and image annotations share the same per-asset targetId so a single
+    // annotation doc round-trips regardless of which viewer opened it.
+    const targetId = `asset-${asset.id}`
+    const adapter = isVideo
+      ? createVideoViewerAdapter(
+          [{ id: targetId, src: asset.file_path, label: asset.name }],
+          { targetId, frameRate: asset.fps ?? undefined },
+        )
+      : createTiledImageViewerAdapter({
+          imageUrl: asset.file_path,
+          targetId,
+          width: asset.width ?? undefined,
+          height: asset.height ?? undefined,
+        })
     const room = new BroadcastCollaborationRoom(doc.room_id, profile)
     if (doc.doc_state) {
       try {
@@ -182,7 +203,7 @@ function AnnotatorWorkspace({
       setEngine(null)
       setSnapshot(null)
     }
-  }, [asset.id, asset.file_path, asset.width, asset.height, doc.room_id, doc.doc_state, profile])
+  }, [asset.id, asset.file_path, asset.name, asset.width, asset.height, asset.fps, isVideo, doc.room_id, doc.doc_state, profile])
 
   if (!engine || !snapshot) {
     return (
@@ -270,7 +291,10 @@ function AnnotatorWorkspace({
       <header className="annotator-page__header">
         <div className="annotator-page__title">
           <h1>{asset.name}</h1>
-          <span>Image annotation · {asset.width ?? '?'} × {asset.height ?? '?'}</span>
+          <span>
+            {isVideo ? 'Video annotation' : 'Image annotation'} · {asset.width ?? '?'} × {asset.height ?? '?'}
+            {isVideo && asset.fps ? ` · ${asset.fps.toFixed(2)} fps` : ''}
+          </span>
         </div>
         <div className="annotator-page__participants">
           {participants.map((participant) => (
@@ -287,9 +311,12 @@ function AnnotatorWorkspace({
           <button className="annotator-page__action" onClick={handleSaveSnapshot}>
             {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : 'Save'}
           </button>
-          <button className="annotator-page__action" onClick={handleGenerateMask}>
-            {maskState === 'working' ? 'Rendering…' : maskState === 'idle' ? 'Generate mask' : maskState}
-          </button>
+          {/* Mask rasterization is a still-image operation; it ignores frame binding. */}
+          {!isVideo ? (
+            <button className="annotator-page__action" onClick={handleGenerateMask}>
+              {maskState === 'working' ? 'Rendering…' : maskState === 'idle' ? 'Generate mask' : maskState}
+            </button>
+          ) : null}
           <button
             className="annotator-page__action annotator-page__action--primary"
             onClick={handlePublishVersion}
@@ -307,7 +334,7 @@ function AnnotatorWorkspace({
       </header>
 
       <AnnotationViewport
-        title="2D tiled viewer"
+        title={isVideo ? 'Frame-accurate video' : '2D tiled viewer'}
         adapter={adapter}
         room={room}
         annotations={snapshot.annotations}

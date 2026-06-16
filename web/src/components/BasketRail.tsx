@@ -25,6 +25,7 @@ import {
 } from '@tabler/icons-react';
 import { createBoard, createCollection } from '../api/boards';
 import { SLOTS, basketManifest, basketToCanvas, useBasketStore } from '../stores/basket';
+import { useProject } from '../features/projects/ProjectContext';
 
 function downloadJson(payload: object, filename: string) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -39,6 +40,7 @@ function downloadJson(payload: object, filename: string) {
 export function BasketRail() {
   const { items, collapsed, remove, setSlot, clear, toggleCollapsed } = useBasketStore();
   const [, navigate] = useLocation();
+  const { code } = useProject();
   const [collectionName, setCollectionName] = useState('');
   const [collectionModal, setCollectionModal] = useState(false);
 
@@ -53,7 +55,7 @@ export function BasketRail() {
   }, [items]);
 
   const makeBoard = useMutation({
-    mutationFn: () => createBoard('Reference board', basketToCanvas(items)),
+    mutationFn: () => createBoard('Reference board', basketToCanvas(items), code),
     onSuccess: (board) => navigate(`/boards/${board.id}`),
   });
 
@@ -62,6 +64,7 @@ export function BasketRail() {
       createCollection(
         collectionName,
         items.map((i) => i.asset.id),
+        code,
       ),
     onSuccess: () => {
       setCollectionModal(false);

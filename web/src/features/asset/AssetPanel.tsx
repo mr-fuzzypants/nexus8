@@ -13,6 +13,7 @@ import { previewUrl, thumbUrl, type AssetSummary } from '../../api/library';
 import { listMasks } from '../annotator/annotatorApi';
 import { useLibraryStore } from '../../stores/library';
 import { useBasketStore } from '../../stores/basket';
+import { useProject } from '../projects/ProjectContext';
 import { RelatedSection } from './RelatedSection';
 import { SimilarSection } from './SimilarSection';
 import { VersionsSection } from './VersionsSection';
@@ -88,6 +89,7 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
   const addToBasket = useBasketStore((s) => s.add);
   const removeFromBasket = useBasketStore((s) => s.remove);
   const [, navigate] = useLocation();
+  const { code } = useProject();
 
   return (
     <Drawer
@@ -146,14 +148,14 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
             </Badge>
           </Group>
 
-          {asset.media_type === 'image' && (
+          {(asset.media_type === 'image' || asset.media_type === 'video') && (
             <Button
               variant="light"
               color="teal"
               leftSection={<IconPencil size={16} stroke={1.75} />}
-              onClick={() => navigate(`/annotate/${asset.id}`)}
+              onClick={() => navigate(`~/p/${code}/annotate/${asset.id}`)}
             >
-              Annotate &amp; mask
+              {asset.media_type === 'video' ? 'Annotate video' : 'Annotate & mask'}
             </Button>
           )}
 
@@ -186,6 +188,8 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
           <ActivitySection asset={asset} />
 
           <dl className="meta-grid">
+            <dt>ID</dt>
+            <dd>{asset.id}</dd>
             <dt>Code</dt>
             <dd>{asset.code}</dd>
             <dt>Type</dt>
@@ -194,6 +198,8 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
             <dd>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : '—'}</dd>
             <dt>Added</dt>
             <dd>{new Date(asset.created_at).toLocaleString()}</dd>
+            <dt>File path</dt>
+            <dd style={{ wordBreak: 'break-all' }}>{asset.file_path || '—'}</dd>
           </dl>
         </Stack>
       )}

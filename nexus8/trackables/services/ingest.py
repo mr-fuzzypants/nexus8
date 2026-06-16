@@ -13,8 +13,12 @@ the existing asset instead of creating a duplicate.
 import base64
 import hashlib
 import io
+import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 
 from django.conf import settings
 from django.core.files.storage import default_storage
@@ -80,6 +84,132 @@ def _build_pyramid(original_bytes, content_hash):
     return thumbnails, technical, placeholder
 
 
+def _to_float(value):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
+
+
+def _to_int(value):
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
+
+
+def _parse_frame_rate(value):
+    """ffprobe reports frame rates as a 'num/den' rational (e.g. '24000/1001')."""
+    if not isinstance(value, str):
+        return None
+    if "/" in value:
+        num, _, den = value.partition("/")
+        numerator = _to_float(num)
+        denominator = _to_float(den)
+        if numerator is None or denominator is None:
+            return None
+        return numerator / denominator
+    return _to_float(value)
+
+
+def _probe_video_file(path):
+    """Run ffprobe on a local file; return a video technical_metadata dict (or {})."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return {}
+
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries",
+                "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,codec_name,duration"
+                ":format=duration",
+                "-of", "json",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    if proc.returncode != 0:
+        return {}
+
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return {}
+
+    streams = payload.get("streams") or []
+    if not streams:
+        return {}
+    stream = streams[0]
+    fmt = payload.get("format") or {}
+
+    # r_frame_rate is the nominal (constant) rate; prefer it for frame-accurate
+    # seeking and fall back to the average rate for variable-frame-rate sources.
+    fps = _parse_frame_rate(stream.get("r_frame_rate")) or _parse_frame_rate(
+        stream.get("avg_frame_rate")
+    )
+    duration = _to_float(stream.get("duration")) or _to_float(fmt.get("duration"))
+    nb_frames = _to_int(stream.get("nb_frames"))
+    if nb_frames is None and fps and duration:
+        nb_frames = int(round(fps * duration))
+
+    technical = {}
+    width = _to_int(stream.get("width"))
+    height = _to_int(stream.get("height"))
+    if width:
+        technical["width"] = width
+    if height:
+        technical["height"] = height
+    if duration:
+        technical["duration"] = duration
+    if fps:
+        technical["fps"] = fps
+    if nb_frames:
+        technical["nb_frames"] = nb_frames
+    if stream.get("codec_name"):
+        technical["codec"] = stream["codec_name"]
+    return technical
+
+
+def _probe_video(rel_path, original_bytes):
+    """Resolve a local path for the stored video and ffprobe it.
+
+    Local storages expose a filesystem path directly; remote storages (which
+    raise NotImplementedError) get a short-lived temp copy to probe.
+    """
+    try:
+        local_path = default_storage.path(rel_path)
+    except (NotImplementedError, ValueError, AttributeError):
+        local_path = None
+
+    if local_path and os.path.exists(local_path):
+        return _probe_video_file(local_path)
+
+    suffix = os.path.splitext(rel_path)[1]
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(original_bytes)
+            tmp_path = tmp.name
+        return _probe_video_file(tmp_path)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
 def store_media_bytes(original_bytes, filename):
     """
     Persist bytes + thumbnail pyramid. Returns a dict with content_hash,
@@ -104,6 +234,10 @@ def store_media_bytes(original_bytes, filename):
         except Exception:
             # Unreadable/corrupt image: keep the original, skip renditions.
             media_type = "file"
+    elif media_type == "video":
+        # Extract width/height/duration/fps/nb_frames/codec so the annotator can
+        # seek frame-accurately. ffprobe failures degrade gracefully to {}.
+        technical = _probe_video(rel_original, original_bytes)
 
     technical["file_size"] = len(original_bytes)
     return {

@@ -15,9 +15,8 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.conf import settings
-from django.conf.urls.static import static
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import path, include, re_path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 urlpatterns = [
@@ -34,5 +33,16 @@ urlpatterns = [
 # Add silk profiling URLs
 urlpatterns += [path('silk/', include('silk.urls', namespace='silk'))]
 
-# Serve uploaded media (originals + thumbnails) in development
-urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+# Serve uploaded media (originals + thumbnails) in development, with HTTP Range
+# support so <video> seeking fetches only the bytes it needs (see media_serve).
+if settings.DEBUG:
+    from nexus8.media_serve import serve_media_with_range
+
+    _media_prefix = settings.MEDIA_URL.lstrip("/")
+    urlpatterns += [
+        re_path(
+            rf"^{_media_prefix}(?P<path>.*)$",
+            serve_media_with_range,
+            {"document_root": settings.MEDIA_ROOT},
+        ),
+    ]

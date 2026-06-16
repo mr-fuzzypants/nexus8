@@ -60,6 +60,11 @@ from .views_annotations import (
     LibraryAssetDetailView,
     MaskSaveView,
 )
+from .views_projects import (
+    ProjectAssignView,
+    ProjectDetailView,
+    ProjectListView,
+)
 from .views_intelligence import (
     AssetRelationsView,
     AssetSimilarView,
@@ -95,6 +100,9 @@ urlpatterns = [
     path('api/library/recommendations/', RecommendationsView.as_view(), name='library-recommendations'),
     path('api/library/assets/<int:pk>/relations/', AssetRelationsView.as_view(), name='library-asset-relations'),
     path('api/library/relations/<int:pk>/', RelationDetailView.as_view(), name='library-relation'),
+    path('api/library/projects/', ProjectListView.as_view(), name='library-projects'),
+    path('api/library/projects/<str:code>/', ProjectDetailView.as_view(), name='library-project'),
+    path('api/library/projects/<str:code>/assign/', ProjectAssignView.as_view(), name='library-project-assign'),
     path('api/library/entities/', EntityListView.as_view(), name='library-entities'),
     path('api/library/entities/<int:pk>/', EntityDetailView.as_view(), name='library-entity'),
     path('api/library/containers/tree/', ContainerTreeView.as_view(), name='library-container-tree'),

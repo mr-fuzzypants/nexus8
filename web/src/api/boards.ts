@@ -32,13 +32,19 @@ export interface BoardDetail extends BoardSummary {
 
 const BASE = '/trackables/api/library/boards/';
 
-export async function listBoards(): Promise<BoardSummary[]> {
-  const { data } = await http.get<BoardSummary[]>(BASE);
+export async function listBoards(project?: string): Promise<BoardSummary[]> {
+  const { data } = await http.get<BoardSummary[]>(BASE, {
+    params: project ? { project } : {},
+  });
   return data;
 }
 
-export async function createBoard(name: string, canvas?: CanvasDoc): Promise<BoardDetail> {
-  const { data } = await http.post<BoardDetail>(BASE, { name, canvas });
+export async function createBoard(
+  name: string,
+  canvas?: CanvasDoc,
+  project?: string,
+): Promise<BoardDetail> {
+  const { data } = await http.post<BoardDetail>(BASE, { name, canvas, project });
   return data;
 }
 
@@ -67,10 +73,12 @@ export async function deleteBoard(id: number): Promise<void> {
 export async function createCollection(
   name: string,
   assetIds: number[],
+  project?: string,
 ): Promise<{ id: number; code: string; name: string }> {
   const { data } = await http.post('/trackables/api/library/collections/', {
     name,
     asset_ids: assetIds,
+    project,
   });
   return data;
 }

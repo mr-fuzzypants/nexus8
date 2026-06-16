@@ -31,6 +31,9 @@ import { defaultAnnotationRenderPluginManager } from '../core/rendering/annotati
 import { createCachedProjectionHost } from '../core/rendering/host'
 import { annotationMatchesViewer } from '../core/viewers/adapters'
 import type { ViewerAdapter, ViewerSurfaceController, ViewportSize } from '../core/viewers/adapters'
+import type { VideoViewerAdapter } from '../core/viewers/videoAdapter'
+import { isAnnotationVisibleAtPlaybackTime } from '../core/annotations/timeline'
+import { VideoTransport } from './VideoTransport'
 import { renderPrimitiveBatchesToCanvas } from '../core/rendering/canvasRenderer'
 import { buildAnnotationSceneRenderPlan } from '../core/rendering/renderService'
 import { buildAnnotationSpatialIndex } from '../core/rendering/spatialIndex'
@@ -180,9 +183,36 @@ export function AnnotationViewport({
   // so zoom and camera changes stay in sync without rebuilding the wrapper per update.
   const projectionHost = useMemo(() => createCachedProjectionHost(adapter), [adapter])
 
+  // A video adapter exposes playback controls; detected structurally so this generic
+  // viewport stays decoupled from the concrete factory.
+  const videoAdapter = useMemo(
+    () => ('getMediaState' in adapter ? (adapter as VideoViewerAdapter) : null),
+    [adapter],
+  )
+
   const visibleAnnotations = useMemo(
-    () => annotations.filter((annotation) => annotationMatchesViewer(annotation, adapter)),
-    [adapter, annotations],
+    () => {
+      // adapterVersion ticks on every frame callback, so video visibility recomputes
+      // as the playhead moves.
+      void adapterVersion
+      const matched = annotations.filter((annotation) => annotationMatchesViewer(annotation, adapter))
+      if (!videoAdapter) {
+        return matched
+      }
+      const media = videoAdapter.getMediaState()
+      return matched.filter((annotation) =>
+        isAnnotationVisibleAtPlaybackTime(annotation, {
+          currentTime: media.currentTime,
+          playlistCurrentTime: media.playlistCurrentTime,
+          playlistDuration: media.playlistDuration,
+          frameRate: media.frameRate,
+          currentFrame: media.currentFrame,
+          activeClipId: media.activeClipId,
+          sourceLabel: media.sourceLabel,
+        }),
+      )
+    },
+    [adapter, adapterVersion, annotations, videoAdapter],
   )
   const selectedAnnotation = useMemo(
     () => (selectedId ? annotations.find((annotation) => annotation.id === selectedId) : undefined),
@@ -306,8 +336,12 @@ export function AnnotationViewport({
   const diagnostics = adapter.getDiagnostics?.() ?? []
   const selectedAnnotationIsVisible = Boolean(selectedAnnotation && annotationMatchesViewer(selectedAnnotation, adapter))
   const viewerToolbarGroups = useMemo<ViewerToolbarGroup[]>(() => {
+    // Mask tools (brush/polygon) drive still-image mask rasterization, which has no
+    // per-frame meaning on video — drop them from the video toolset.
     const toolIds: ViewerToolbarToolId[] = adapter.space === 'image2d'
-      ? ['select', 'freehand', 'brush', 'polygon', 'rectangle', 'ellipse', 'text', 'card']
+      ? videoAdapter
+        ? ['select', 'freehand', 'rectangle', 'ellipse', 'text', 'card']
+        : ['select', 'freehand', 'brush', 'polygon', 'rectangle', 'ellipse', 'text', 'card']
       : ['select', 'freehand', 'rectangle', 'ellipse']
 
     const toolLabels: Record<ViewerToolbarToolId, string> = {
@@ -396,6 +430,7 @@ export function AnnotationViewport({
     onUndo,
     selectedAnnotationIsVisible,
     selectedImageAnnotation,
+    videoAdapter,
     viewerActions,
     viewport,
   ])
@@ -1342,6 +1377,7 @@ export function AnnotationViewport({
           onPointerLeave={handlePointerLeave}
         />
       </div>
+      {videoAdapter ? <VideoTransport adapter={videoAdapter} /> : null}
       <footer className="viewer-card__footer">
         <span>{adapter.space === 'image2d' ? 'Image-space anchors' : 'World-space anchors'}</span>
         {statusBadges.map((badge) => (

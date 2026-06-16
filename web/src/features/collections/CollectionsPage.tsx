@@ -3,13 +3,15 @@ import { useLocation } from 'wouter';
 import { ActionIcon, Badge, Text } from '@mantine/core';
 import { IconBookmark, IconTrash } from '@tabler/icons-react';
 import { deleteSmartCollection, listSmartCollections } from '../../api/intelligence';
+import { useProject } from '../projects/ProjectContext';
 
 export function CollectionsPage() {
   const [, navigate] = useLocation();
+  const { code } = useProject();
   const queryClient = useQueryClient();
   const collections = useQuery({
-    queryKey: ['smart-collections'],
-    queryFn: listSmartCollections,
+    queryKey: ['smart-collections', code],
+    queryFn: () => listSmartCollections(code),
   });
   const remove = useMutation({
     mutationFn: deleteSmartCollection,

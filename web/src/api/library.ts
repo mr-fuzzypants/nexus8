@@ -14,9 +14,15 @@ export interface AssetSummary {
   placeholder: string;
   width: number | null;
   height: number | null;
+  // Video-only fields (null for images); used to seed the frame-accurate viewer.
+  duration?: number | null;
+  fps?: number | null;
+  nb_frames?: number | null;
+  codec?: string | null;
   tags: string[];
   ai_description: string;
   ai_analysis_status: string;
+  project_code: string;
   created_at: string;
 }
 
@@ -50,6 +56,7 @@ export interface SearchParams {
   q?: string;
   tags?: string[];
   mediaType?: string;
+  project?: string;
   page?: number;
   pageSize?: number;
 }
@@ -59,6 +66,7 @@ export async function searchLibrary(params: SearchParams): Promise<SearchRespons
   if (params.q) query.set('q', params.q);
   for (const tag of params.tags ?? []) query.append('tag', tag);
   if (params.mediaType) query.set('media_type', params.mediaType);
+  if (params.project) query.set('project', params.project);
   query.set('page', String(params.page ?? 1));
   query.set('page_size', String(params.pageSize ?? 60));
   const { data } = await http.get<SearchResponse>(
@@ -72,9 +80,10 @@ export interface UploadResponse {
   duplicates: AssetSummary[];
 }
 
-export async function uploadFiles(files: File[]): Promise<UploadResponse> {
+export async function uploadFiles(files: File[], project?: string): Promise<UploadResponse> {
   const form = new FormData();
   for (const file of files) form.append('files', file);
+  if (project) form.append('project', project);
   const { data } = await http.post<UploadResponse>('/trackables/api/library/upload/', form);
   return data;
 }

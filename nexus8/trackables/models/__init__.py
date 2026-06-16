@@ -60,6 +60,10 @@ from .annotations import (
 from .collections import (
     SmartCollection,
 )
+from .projects import (
+    PROJECT_STATUSES,
+    Project,
+)
 from .relations import (
     EntityRelation,
 )
@@ -107,6 +111,8 @@ __all__ = [
     "LoraAdapter",
     "MediaAsset",
     "ModelCheckpoint",
+    "PROJECT_STATUSES",
+    "Project",
     "PromptTemplate",
     "SmartCollection",
     "Symlink",

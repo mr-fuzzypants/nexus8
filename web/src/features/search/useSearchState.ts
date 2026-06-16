@@ -8,8 +8,10 @@ export interface SearchState {
 }
 
 /**
- * Search state lives entirely in the URL (?q=&tag=&tag=&media_type=) so
- * every result set is shareable and survives reloads.
+ * Search state lives entirely in the URL (?q=&tag=&tag=&media_type=) so every
+ * result set is shareable and survives reloads. Project scope comes from the
+ * /p/:code route (see useProject), not the query string. Navigation is
+ * relative, so under the nested workspace router it stays within the project.
  */
 export function useSearchState() {
   const search = useSearch();

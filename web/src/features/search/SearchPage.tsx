@@ -23,6 +23,7 @@ import { AssetPanel } from '../asset/AssetPanel';
 import { useSearchState } from './useSearchState';
 import { RecommendationsStrip } from './RecommendationsStrip';
 import { EntityFilterModal } from './EntityFilterModal';
+import { useProject } from '../projects/ProjectContext';
 import type { EntityFacet } from '../../api/library';
 
 const DENSITIES = [
@@ -49,6 +50,7 @@ function FacetChip({
 }
 
 export function SearchPage() {
+  const { code } = useProject();
   const { state, update, toggleTag } = useSearchState();
   const [input, setInput] = useState(state.q);
   const [debouncedInput] = useDebouncedValue(input, 250);
@@ -69,12 +71,13 @@ export function SearchPage() {
   }, [debouncedInput]);
 
   const query = useInfiniteQuery({
-    queryKey: ['library-search', state.q, state.tags, state.mediaType],
+    queryKey: ['library-search', code, state.q, state.tags, state.mediaType],
     queryFn: ({ pageParam }) =>
       searchLibrary({
         q: state.q,
         tags: state.tags,
         mediaType: state.mediaType,
+        project: code,
         page: pageParam,
       }),
     initialPageParam: 1,
@@ -90,7 +93,7 @@ export function SearchPage() {
   const totalCount = query.data?.pages[0]?.count ?? 0;
 
   const upload = useMutation({
-    mutationFn: uploadFiles,
+    mutationFn: (files: File[]) => uploadFiles(files, code),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['library-search'] });
     },
@@ -101,7 +104,7 @@ export function SearchPage() {
   const [saveName, setSaveName] = useState('');
   const saveSearch = useMutation({
     mutationFn: () =>
-      createSmartCollection(saveName, window.location.search.replace(/^\?/, '')),
+      createSmartCollection(saveName, window.location.search.replace(/^\?/, ''), code),
     onSuccess: () => {
       setSaveModal(false);
       setSaveName('');

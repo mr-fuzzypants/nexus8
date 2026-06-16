@@ -70,6 +70,9 @@ Results are ranked by a blend of keyword matching and **semantic similarity**
 — the AI understands the *content* of your images, so assets match even when
 no tag or name contains your words.
 
+> Want to know exactly how ranking works, why a query returns broad results, or
+> how to tune it? See [SEARCH.md](SEARCH.md).
+
 ### Structured tokens
 
 Mix precise filters into the same query:

@@ -46,7 +46,7 @@ MAX_ENTITY_FACETS = 20
 RRF_K = 60
 KEYWORD_POOL = 200
 SEMANTIC_POOL = 100
-SEMANTIC_MAX_DISTANCE = 0.8
+SEMANTIC_MAX_DISTANCE = 0.70
 
 
 @lru_cache(maxsize=256)
@@ -75,9 +75,16 @@ def asset_summary(asset):
         "placeholder": data.get("placeholder", ""),
         "width": technical.get("width"),
         "height": technical.get("height"),
+        # Video-only fields (absent for images); the annotator needs fps + duration
+        # for frame-accurate seeking.
+        "duration": technical.get("duration"),
+        "fps": technical.get("fps"),
+        "nb_frames": technical.get("nb_frames"),
+        "codec": technical.get("codec"),
         "tags": tags,
         "ai_description": data.get("ai_generated_description", ""),
         "ai_analysis_status": asset.ai_analysis_status,
+        "project_code": data.get("project_code", ""),
         "created_at": asset.created_at.isoformat(),
     }
 
@@ -94,12 +101,18 @@ class LibraryUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Optional hard-partition scope: stamp uploads into the active project.
+        project = (request.data.get("project") or "").strip()
+
         created, duplicates = [], []
         for uploaded in files:
             asset, was_created = ingest_file(
                 uploaded,
                 created_by=request.user if request.user.is_authenticated else None,
             )
+            if project and (asset.type_data or {}).get("project_code") != project:
+                asset.type_data = {**(asset.type_data or {}), "project_code": project}
+                asset.save(update_fields=["type_data", "updated_at"])
             (created if was_created else duplicates).append(asset_summary(asset))
 
         return Response(
@@ -139,6 +152,11 @@ class LibrarySearchView(APIView):
             tokens.setdefault("type", []).append(params["media_type"])
 
         queryset = MediaAsset.objects.active()
+
+        # Hard project partition: scope every result to one project when asked.
+        project = params.get("project")
+        if project:
+            queryset = queryset.filter(type_data__project_code=project)
 
         for media_type in tokens.pop("type", []):
             queryset = queryset.filter(type_data__media_type=media_type)
@@ -342,6 +360,9 @@ class BoardListView(APIView):
 
     def get(self, request):
         boards = Board.objects.active().order_by("-updated_at")
+        project = request.query_params.get("project")
+        if project:
+            boards = boards.filter(type_data__project_code=project)
         return Response(
             [{**board_summary(b), "preview_thumbs": preview_thumbs(b)} for b in boards]
         )
@@ -349,10 +370,14 @@ class BoardListView(APIView):
     def post(self, request):
         name = (request.data.get("name") or "Untitled board").strip()
         canvas = request.data.get("canvas") or {"items": []}
+        type_data = {"canvas": canvas}
+        project = (request.data.get("project") or "").strip()
+        if project:
+            type_data["project_code"] = project
         board = Board.objects.create(
             code=f"board_{uuid.uuid4().hex[:10]}",
             name=name,
-            type_data={"canvas": canvas},
+            type_data=type_data,
         )
         return Response(board_detail(board), status=status.HTTP_201_CREATED)
 
@@ -409,9 +434,11 @@ class CollectionCreateView(APIView):
             return Response(
                 {"detail": "name is required"}, status=status.HTTP_400_BAD_REQUEST
             )
+        project = (request.data.get("project") or "").strip()
         container = Container.objects.create(
             code=f"collection_{uuid.uuid4().hex[:10]}",
             name=name,
+            type_data={"project_code": project} if project else {},
         )
         container.publish(
             data={"assets": asset_ids, "source": "basket"},

@@ -87,6 +87,43 @@ body {
   overflow: hidden;
 }
 
+.app-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.workspace-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  padding: 0.45rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+
+.workspace-crumbs .crumb {
+  color: var(--muted-foreground);
+  text-decoration: none;
+}
+
+.workspace-crumbs .crumb:hover {
+  color: var(--foreground);
+}
+
+.workspace-crumbs .crumb.current {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.workspace-crumbs .crumb-sep {
+  opacity: 0.45;
+}
+
 .brand-lockup {
   display: flex;
   align-items: center;
@@ -142,6 +179,37 @@ body {
 .nav-link.active {
   color: var(--secondary-foreground);
   background: var(--secondary);
+}
+
+.project-switcher {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  margin-bottom: 0.75rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--foreground);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.project-switcher:hover {
+  border-color: var(--primary);
+}
+
+.project-switcher-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, rgba(94, 234, 212, 0.25), rgba(56, 189, 248, 0.18));
+  color: var(--primary);
+  flex-shrink: 0;
 }
 
 .nav-section-label {

@@ -15,7 +15,9 @@ import json
 import logging
 import mimetypes
 import os
+import shutil
 import ssl
+import tempfile
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
@@ -147,22 +149,45 @@ class AIAssetIntelligenceService:
             raise
     
     async def _analyze_video_asset(self, media_asset) -> Dict[str, Any]:
-        """Analyze video/animation assets."""
+        """Analyze video/animation assets by sampling keyframes with GPT-4 Vision.
+
+        Falls back to filename/metadata text analysis when ffmpeg is unavailable
+        or no frames can be extracted, preserving the previous behaviour.
+        """
         try:
-            # Extract video metadata and first frame
             video_info = await self._extract_video_metadata(media_asset.file_path)
-            
-            # For video analysis, we could extract keyframes and analyze them
-            # For now, analyze based on filename and metadata
-            prompt = self._build_video_analysis_prompt(media_asset, video_info)
-            
-            response = await self._call_gpt4_text(prompt)
+
+            frames = []
+            try:
+                frames = await self._extract_keyframes(
+                    media_asset.file_path,
+                    duration=video_info.get("duration"),
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Keyframe extraction failed for {media_asset.code}: {e}"
+                )
+
+            prompt = self._build_video_analysis_prompt(
+                media_asset, video_info, has_frames=bool(frames)
+            )
+
+            if frames:
+                response = await self._call_gpt4_vision(frames, prompt)
+                default_confidence = 0.85
+            else:
+                # No frames (ffmpeg missing / extraction failed): degrade to the
+                # previous filename + metadata text analysis.
+                response = await self._call_gpt4_text(prompt)
+                default_confidence = 0.6
+
             embedding = await self.generate_embedding(response.get('description', ''))
-            
+            video_info = {**video_info, "keyframes_analyzed": len(frames)}
+
             return {
                 'description': response.get('description', ''),
                 'tags': response.get('tags', []),
-                'confidence_score': response.get('confidence_score', 0.7),
+                'confidence_score': response.get('confidence_score', default_confidence),
                 'embedding': embedding,
                 'suggested_omc_type': 'digital.movingImage',
                 'technical_metadata': video_info,
@@ -170,7 +195,7 @@ class AIAssetIntelligenceService:
                 'production_stage': response.get('production_stage', ''),
                 'quality_score': response.get('quality_score')
             }
-            
+
         except Exception as e:
             logger.error(f"Error analyzing video asset {media_asset.code}: {str(e)}")
             raise
@@ -242,27 +267,35 @@ class AIAssetIntelligenceService:
             logger.error(f"Error generating embedding: {str(e)}")
             return None
     
-    async def _call_gpt4_vision(self, image_data: str, prompt: str, mime: str = 'image/jpeg') -> Dict[str, Any]:
-        """Call GPT-4 Vision API for image analysis."""
+    async def _call_gpt4_vision(self, images, prompt: str, mime: str = 'image/jpeg') -> Dict[str, Any]:
+        """Call GPT-4 Vision API for image/video-frame analysis.
+
+        ``images`` may be a single base64 string (with ``mime``), or a list of
+        ``(base64_data, mime)`` tuples — e.g. keyframes sampled from a video,
+        sent in one request so the model reasons about the clip as a whole.
+        """
+        if isinstance(images, str):
+            images = [(images, mime)]
+
+        image_blocks = [
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{frame_mime};base64,{frame_data}"},
+            }
+            for frame_data, frame_mime in images
+        ]
+
         try:
             async with _http_session() as session:
                 headers = {
                     "Authorization": f"Bearer {self.openai_api_key}",
                     "Content-Type": "application/json"
                 }
-                
+
                 messages = [
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime};base64,{image_data}"
-                                }
-                            }
-                        ]
+                        "content": [{"type": "text", "text": prompt}] + image_blocks,
                     }
                 ]
                 
@@ -459,27 +492,49 @@ Provide analysis in JSON format:
 }}
 """
     
-    def _build_video_analysis_prompt(self, media_asset, video_info) -> str:
+    def _build_video_analysis_prompt(self, media_asset, video_info, has_frames: bool = False) -> str:
         """Build analysis prompt for video assets."""
-        return f"""
-Analyze this video/animation asset:
+        project_context = media_asset.get_project_context()
+
+        if has_frames:
+            intro = (
+                "You are analyzing a video. Several keyframes sampled in "
+                "chronological order across the clip are attached below. Base your "
+                "analysis on what is actually visible: how many people appear and "
+                "what they are doing (e.g. two people talking), their interactions, "
+                "the setting, camera framing, and how the action progresses across "
+                "the sequence. Write the description so it is useful for someone "
+                "searching by content."
+            )
+        else:
+            intro = (
+                "Analyze this video/animation asset based on its filename and "
+                "metadata only (no frames were available for visual inspection)."
+            )
+
+        return f"""{intro}
+
+Asset:
 - Code: {media_asset.code}
 - Name: {media_asset.name}
-- Video Info: {video_info}
+- Media Type: {media_asset.media_type}
+- Project Context: {project_context}
+- Technical info: duration={video_info.get('duration')}s, resolution={video_info.get('resolution')}, fps={video_info.get('fps')}, codec={video_info.get('codec')}
 
 Provide analysis in JSON format:
 {{
-    "description": "Description of video content and purpose",
-    "tags": ["video", "animation", "sequence", "shot"],
-    "confidence_score": 0.7,
+    "description": "Detailed description of what happens in the video: people and how many, their actions and interactions, setting, and notable visual content",
+    "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
+    "confidence_score": 0.9,
     "omc_type": "digital.movingImage",
-    "technical_metadata": {video_info},
+    "technical_metadata": {{}},
     "creative_metadata": {{
         "content_type": "animation|live_action|composite",
-        "shot_type": "wide|medium|close|extreme_close"
+        "shot_type": "wide|medium|close|extreme_close",
+        "mood": "emotional tone"
     }},
     "production_stage": "rough|animation|lighting|comp|final",
-    "quality_score": 0.75
+    "quality_score": 0.8
 }}
 """
     
@@ -563,20 +618,121 @@ Provide basic analysis in JSON format:
             return {}
     
     async def _extract_video_metadata(self, file_path: str) -> Dict[str, Any]:
-        """Extract video metadata (placeholder - would use ffprobe)."""
-        # In a real implementation, you would use ffprobe or similar
-        # to extract video metadata like duration, resolution, fps, etc.
+        """Extract video metadata via ffprobe (duration, resolution, fps, codec).
+
+        Returns the base file metadata with video fields left as None when
+        ffprobe is unavailable or the probe fails.
+        """
         file_info = await self._extract_file_metadata(file_path)
-        
-        # Add video-specific fields
         file_info.update({
-            'duration': None,  # Would extract with ffprobe
+            'duration': None,
             'resolution': None,
             'fps': None,
-            'codec': None
+            'codec': None,
         })
-        
+
+        ffprobe = shutil.which("ffprobe")
+        disk_path = self._resolve_media_path(file_path)
+        if not ffprobe or not os.path.exists(disk_path):
+            return file_info
+
+        args = [
+            ffprobe, "-v", "error", "-print_format", "json",
+            "-show_format", "-show_streams", disk_path,
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                return file_info
+
+            probe = json.loads(stdout.decode() or "{}")
+            fmt = probe.get("format", {})
+            if fmt.get("duration"):
+                file_info["duration"] = round(float(fmt["duration"]), 3)
+
+            vstream = next(
+                (s for s in probe.get("streams", []) if s.get("codec_type") == "video"),
+                None,
+            )
+            if vstream:
+                width, height = vstream.get("width"), vstream.get("height")
+                if width and height:
+                    file_info["resolution"] = f"{width}x{height}"
+                file_info["codec"] = vstream.get("codec_name")
+                rate = vstream.get("avg_frame_rate") or vstream.get("r_frame_rate")
+                if rate and "/" in rate:
+                    num, den = rate.split("/")
+                    file_info["fps"] = round(float(num) / float(den), 3) if float(den) else None
+        except Exception as e:
+            logger.warning(f"ffprobe failed for {disk_path}: {e}")
+
         return file_info
+
+    async def _extract_keyframes(
+        self,
+        file_path: str,
+        max_frames: int = 8,
+        duration: Optional[float] = None,
+        max_dim: int = 512,
+    ) -> List[Tuple[str, str]]:
+        """Sample up to ``max_frames`` keyframes from a video using ffmpeg.
+
+        Returns a list of ``(base64_jpeg, "image/jpeg")`` tuples in chronological
+        order. Returns an empty list (rather than raising) when ffmpeg is not
+        installed, so callers can fall back to text analysis.
+        """
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            logger.warning("ffmpeg not found on PATH; skipping keyframe extraction")
+            return []
+
+        disk_path = self._resolve_media_path(file_path)
+        if not os.path.exists(disk_path):
+            raise FileNotFoundError(f"Video file not found: {disk_path}")
+
+        # Evenly sample across the duration when known; otherwise fall back to
+        # scene-change detection to grab visually distinct frames.
+        if duration and duration > 0:
+            vf = f"fps={max_frames}/{duration},scale='min({max_dim},iw)':-2"
+        else:
+            vf = f"select='gt(scene,0.3)',scale='min({max_dim},iw)':-2"
+
+        with tempfile.TemporaryDirectory(prefix="kf_") as tmpdir:
+            out_pattern = os.path.join(tmpdir, "frame_%03d.jpg")
+            args = [
+                ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-i", disk_path,
+                "-vf", vf,
+                "-vsync", "vfr",
+                "-frames:v", str(max_frames),
+                "-q:v", "5",
+                out_pattern,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.warning(
+                    f"ffmpeg keyframe extraction failed ({disk_path}): "
+                    f"{stderr.decode()[:500]}"
+                )
+                return []
+
+            frames: List[Tuple[str, str]] = []
+            for name in sorted(os.listdir(tmpdir)):
+                with open(os.path.join(tmpdir, name), "rb") as fh:
+                    frames.append(
+                        (base64.b64encode(fh.read()).decode("utf-8"), "image/jpeg")
+                    )
+            return frames
 
 
 # Singleton instance for easy import

@@ -1,18 +1,34 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocation } from 'wouter';
-import { Button, Modal, Select, Stack, Text, TextInput } from '@mantine/core';
-import { IconPlus, IconUsers } from '@tabler/icons-react';
+import { Button, Checkbox, Modal, Select, Stack, Text, TextInput } from '@mantine/core';
+import { IconFolderShare, IconPlus, IconUsers } from '@tabler/icons-react';
 import { ENTITY_CATEGORIES, createEntity, getRootEntities, getContainerTree } from '../../api/intelligence';
+import { assignToProject } from '../../api/projects';
+import { useProject } from '../projects/ProjectContext';
 import { ContainerBrowser } from './ContainerBrowser';
+
+const REMOVE_FROM_PROJECT = '_none';
 
 export function EntitiesPage() {
   const [, navigate] = useLocation();
+  const { code: project, projects } = useProject();
   const queryClient = useQueryClient();
   const [selectedContainerId, setSelectedContainerId] = useState<number | null>(null);
   const [modal, setModal] = useState(false);
   const [name, setName] = useState('');
   const [newCategory, setNewCategory] = useState<string | null>('character');
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [moveModal, setMoveModal] = useState(false);
+  const [moveTarget, setMoveTarget] = useState<string | null>(null);
+
+  const toggleSelect = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   // Load container tree once and cache it
   const tree = useQuery({
@@ -22,10 +38,12 @@ export function EntitiesPage() {
 
   // Get entities from tree or root, using cached data
   const entities = useQuery({
-    queryKey: selectedContainerId ? ['entities', 'container', selectedContainerId] : ['entities', 'root'],
+    queryKey: selectedContainerId
+      ? ['entities', 'container', selectedContainerId]
+      : ['entities', 'root', project],
     queryFn: () => {
       if (!selectedContainerId) {
-        return getRootEntities();
+        return getRootEntities(undefined, project || undefined);
       }
 
       // Find container in cached tree data
@@ -47,12 +65,23 @@ export function EntitiesPage() {
   });
 
   const create = useMutation({
-    mutationFn: () => createEntity(name, newCategory ?? 'character'),
+    mutationFn: () => createEntity(name, newCategory ?? 'character', project || undefined),
     onSuccess: () => {
       setModal(false);
       setName('');
       queryClient.invalidateQueries({ queryKey: ['entities'] });
       queryClient.invalidateQueries({ queryKey: ['containerTree'] });
+    },
+  });
+
+  const move = useMutation({
+    mutationFn: () => assignToProject(moveTarget ?? REMOVE_FROM_PROJECT, [...selected]),
+    onSuccess: () => {
+      setMoveModal(false);
+      setMoveTarget(null);
+      setSelected(new Set());
+      queryClient.invalidateQueries({ queryKey: ['entities'] });
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
     },
   });
 
@@ -66,11 +95,27 @@ export function EntitiesPage() {
             <Text size="xs" c="dimmed">
               {entities.data?.length ?? 0} entit{(entities.data?.length ?? 0) === 1 ? 'y' : 'ies'}
             </Text>
+            {selected.size > 0 && (
+              <>
+                <Button
+                  size="xs"
+                  variant="light"
+                  leftSection={<IconFolderShare size={15} stroke={1.75} />}
+                  onClick={() => setMoveModal(true)}
+                  style={{ marginLeft: 'auto' }}
+                >
+                  Move {selected.size} to project
+                </Button>
+                <Button size="xs" variant="subtle" onClick={() => setSelected(new Set())}>
+                  Clear
+                </Button>
+              </>
+            )}
             <Button
               size="xs"
               leftSection={<IconPlus size={15} stroke={1.75} />}
               onClick={() => setModal(true)}
-              style={{ marginLeft: 'auto' }}
+              style={selected.size > 0 ? undefined : { marginLeft: 'auto' }}
             >
               New entity
             </Button>
@@ -99,8 +144,15 @@ export function EntitiesPage() {
                   e.dataTransfer?.setData('application/json', JSON.stringify(entity));
                   e.dataTransfer!.effectAllowed = 'move';
                 }}
-                style={{ cursor: 'grab' }}
+                style={{ cursor: 'grab', position: 'relative' }}
               >
+                <Checkbox
+                  checked={selected.has(entity.id)}
+                  onChange={() => toggleSelect(entity.id)}
+                  onClick={(e) => e.stopPropagation()}
+                  aria-label={`Select ${entity.name}`}
+                  style={{ position: 'absolute', top: 8, left: 8, zIndex: 1 }}
+                />
                 {entity.thumb ? (
                   <img src={entity.thumb} alt="" loading="lazy" />
                 ) : (
@@ -137,6 +189,31 @@ export function EntitiesPage() {
             />
             <Button disabled={!name.trim()} loading={create.isPending} onClick={() => create.mutate()}>
               Create
+            </Button>
+          </Stack>
+        </Modal>
+
+        <Modal
+          opened={moveModal}
+          onClose={() => setMoveModal(false)}
+          title={`Move ${selected.size} entit${selected.size === 1 ? 'y' : 'ies'} to project`}
+          size="sm"
+        >
+          <Stack gap="sm">
+            <Select
+              label="Project"
+              placeholder="Select a project"
+              value={moveTarget}
+              onChange={setMoveTarget}
+              data={[
+                { value: REMOVE_FROM_PROJECT, label: '— Remove from project —' },
+                ...projects.map((p) => ({ value: p.code, label: p.name })),
+              ]}
+              searchable
+              data-autofocus
+            />
+            <Button disabled={!moveTarget} loading={move.isPending} onClick={() => move.mutate()}>
+              Move
             </Button>
           </Stack>
         </Modal>

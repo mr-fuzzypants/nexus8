@@ -22,6 +22,8 @@ export async function getSimilar(
 // -- entities & relations ----------------------------------------------------
 
 export const ENTITY_CATEGORIES = [
+  'sequence',
+  'shot',
   'character',
   'costume',
   'location',
@@ -64,8 +66,14 @@ export interface Relation {
   entity: EntitySummary;
 }
 
-export async function listEntities(category?: string): Promise<EntitySummary[]> {
-  const { data } = await http.get(`${BASE}entities/`, { params: category ? { category } : {} });
+export async function listEntities(
+  category?: string,
+  project?: string,
+): Promise<EntitySummary[]> {
+  const params: Record<string, string> = {};
+  if (category) params.category = category;
+  if (project) params.project = project;
+  const { data } = await http.get(`${BASE}entities/`, { params });
   return data;
 }
 
@@ -90,13 +98,27 @@ export async function moveEntityToContainer(
   return data;
 }
 
-export async function getRootEntities(category?: string): Promise<EntitySummary[]> {
-  const { data } = await http.get(`${BASE}root-entities/`, { params: category ? { category } : {} });
+export async function getRootEntities(
+  category?: string,
+  project?: string,
+): Promise<EntitySummary[]> {
+  const params: Record<string, string> = {};
+  if (category) params.category = category;
+  if (project) params.project = project;
+  const { data } = await http.get(`${BASE}root-entities/`, { params });
   return data;
 }
 
-export async function createEntity(name: string, category: string): Promise<EntitySummary> {
-  const { data } = await http.post(`${BASE}entities/`, { name, category });
+export async function createEntity(
+  name: string,
+  category: string,
+  projectCode?: string,
+): Promise<EntitySummary> {
+  const { data } = await http.post(`${BASE}entities/`, {
+    name,
+    category,
+    project_code: projectCode,
+  });
   return data;
 }
 
@@ -135,16 +157,21 @@ export interface SmartCollectionSummary {
   created_at: string;
 }
 
-export async function listSmartCollections(): Promise<SmartCollectionSummary[]> {
-  const { data } = await http.get(`${BASE}smart-collections/`);
+export async function listSmartCollections(
+  project?: string,
+): Promise<SmartCollectionSummary[]> {
+  const { data } = await http.get(`${BASE}smart-collections/`, {
+    params: project ? { project } : {},
+  });
   return data;
 }
 
 export async function createSmartCollection(
   name: string,
   query: string,
+  project?: string,
 ): Promise<SmartCollectionSummary> {
-  const { data } = await http.post(`${BASE}smart-collections/`, { name, query });
+  const { data } = await http.post(`${BASE}smart-collections/`, { name, query, project });
   return data;
 }
 
