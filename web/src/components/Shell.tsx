@@ -15,6 +15,7 @@ import {
 import { Menu, Text } from '@mantine/core';
 import clsx from 'clsx';
 import { BasketRail } from './BasketRail';
+import { FloatingViewerLayer } from '../features/viewer/FloatingViewerLayer';
 import { useProject } from '../features/projects/ProjectContext';
 
 // Workspace nav. Hrefs are relative to the /p/:code base (nested routing).
@@ -145,6 +146,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="app-content">{children}</div>
       </main>
       <BasketRail />
+      <FloatingViewerLayer />
     </div>
   );
 }

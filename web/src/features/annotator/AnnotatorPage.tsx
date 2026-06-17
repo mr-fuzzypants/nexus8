@@ -3,6 +3,7 @@ import { useLocation } from 'wouter'
 import { useQuery } from '@tanstack/react-query'
 import * as Y from 'yjs'
 import { assetIs3DModel, assetIsVideo, type AssetSummary } from '../../api/library'
+import { createAssetViewerAdapter } from '../viewer/createAssetAdapter'
 import { AnnotationViewport } from './components/AnnotationViewport'
 import {
   DEFAULT_FREEHAND_PIPELINE_OPTIONS,
@@ -16,8 +17,6 @@ import type {
 } from './core/annotations/types'
 import { BroadcastCollaborationRoom } from './core/collaboration/broadcast'
 import type { ViewerAdapter } from './core/viewers/adapters'
-import { createTiledImageViewerAdapter } from './core/viewers/tiledImageAdapter'
-import { createVideoViewerAdapter } from './core/viewers/videoAdapter'
 import {
   getAsset,
   getOrCreateAnnotationDoc,
@@ -187,29 +186,11 @@ function AnnotatorWorkspace({
       unsubParticipants = room.subscribeParticipants(() => setParticipants(room.getParticipants()))
     }
 
-    if (is3DModel) {
-      // three.js is heavy; load the 3D adapter (and three) only when a model is opened
-      // so image/video annotation keeps a lean bundle.
-      import('./core/viewers/threeModelViewerAdapter').then(({ createThreeModelViewerAdapter }) => {
-        attach(createThreeModelViewerAdapter({ src: asset.file_path, targetId, label: asset.name }))
-      })
-    } else if (isVideo) {
-      attach(
-        createVideoViewerAdapter(
-          [{ id: targetId, src: asset.file_path, label: asset.name }],
-          { targetId, frameRate: asset.fps ?? undefined },
-        ),
-      )
-    } else {
-      attach(
-        createTiledImageViewerAdapter({
-          imageUrl: asset.file_path,
-          targetId,
-          width: asset.width ?? undefined,
-          height: asset.height ?? undefined,
-        }),
-      )
-    }
+    // Viewer selection (and lazy-loading the heavy three.js adapter) lives in the
+    // shared factory so the editing annotator and the read-only viewer agree.
+    createAssetViewerAdapter({ asset, targetId, label: asset.name }).then(({ adapter }) => {
+      attach(adapter)
+    })
 
     return () => {
       disposed = true
@@ -219,7 +200,7 @@ function AnnotatorWorkspace({
       setEngine(null)
       setSnapshot(null)
     }
-  }, [asset.id, asset.file_path, asset.name, asset.width, asset.height, asset.fps, isVideo, is3DModel, doc.room_id, doc.doc_state, profile])
+  }, [asset, doc.room_id, doc.doc_state, profile])
 
   if (!engine || !snapshot) {
     return (

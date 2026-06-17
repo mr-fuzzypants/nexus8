@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ActionIcon, Badge, Button, Group, Loader, Text, Tooltip } from '@mantine/core';
-import { IconArrowsDiff, IconUpload } from '@tabler/icons-react';
+import { IconArrowsDiff, IconEye, IconUpload } from '@tabler/icons-react';
 import clsx from 'clsx';
 import {
   getVersionHistory,
@@ -10,6 +10,7 @@ import {
   type VersionNode,
 } from '../../api/versions';
 import type { AssetSummary } from '../../api/library';
+import { useViewerStore } from '../viewer/viewerStore';
 import { CompareSlider } from './CompareSlider';
 
 interface VersionsSectionProps {
@@ -19,6 +20,7 @@ interface VersionsSectionProps {
 
 export function VersionsSection({ asset, onAssetUpdated }: VersionsSectionProps) {
   const queryClient = useQueryClient();
+  const openViewer = useViewerStore((s) => s.open);
   const fileRef = useRef<HTMLInputElement>(null);
   const [comparing, setComparing] = useState(false);
   const [pickedIds, setPickedIds] = useState<number[]>([]);
@@ -112,34 +114,46 @@ export function VersionsSection({ asset, onAssetUpdated }: VersionsSectionProps)
 
       <div className="version-list">
         {versions.map((version) => (
-          <button
-            key={version.id}
-            type="button"
-            className={clsx(
-              'version-row',
-              comparing && pickedIds.includes(version.id) && 'picked',
-            )}
-            onClick={() => comparing && togglePick(version)}
-            style={{ cursor: comparing ? 'pointer' : 'default' }}
-          >
-            <img src={version.thumbnails['256'] || version.file_path} alt="" loading="lazy" />
-            <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
-              <Group gap={6}>
-                <Badge size="xs" variant="outline">
-                  v{version.version_number}
-                </Badge>
-                {version.symlinks.map((name) => (
-                  <Badge key={name} size="xs" variant="light">
-                    {name}
+          <div key={version.id} className="version-row-wrap">
+            <button
+              type="button"
+              className={clsx(
+                'version-row',
+                comparing && pickedIds.includes(version.id) && 'picked',
+              )}
+              onClick={() => comparing && togglePick(version)}
+              style={{ cursor: comparing ? 'pointer' : 'default', width: '100%' }}
+            >
+              <img src={version.thumbnails['256'] || version.file_path} alt="" loading="lazy" />
+              <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                <Group gap={6}>
+                  <Badge size="xs" variant="outline">
+                    v{version.version_number}
                   </Badge>
-                ))}
-              </Group>
-              <Text size="xs" c="dimmed" mt={2}>
-                {new Date(version.created_at).toLocaleString()}
-                {version.created_by ? ` · ${version.created_by}` : ''}
-              </Text>
-            </div>
-          </button>
+                  {version.symlinks.map((name) => (
+                    <Badge key={name} size="xs" variant="light">
+                      {name}
+                    </Badge>
+                  ))}
+                </Group>
+                <Text size="xs" c="dimmed" mt={2}>
+                  {new Date(version.created_at).toLocaleString()}
+                  {version.created_by ? ` · ${version.created_by}` : ''}
+                </Text>
+              </div>
+            </button>
+            <Tooltip label={`View v${version.version_number}`}>
+              <ActionIcon
+                className="version-row-view"
+                variant="subtle"
+                size="sm"
+                onClick={() => openViewer({ asset, version })}
+                aria-label={`View version ${version.version_number}`}
+              >
+                <IconEye size={14} stroke={1.75} />
+              </ActionIcon>
+            </Tooltip>
+          </div>
         ))}
       </div>
 

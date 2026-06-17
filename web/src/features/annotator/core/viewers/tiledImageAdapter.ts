@@ -439,6 +439,10 @@ export function createTiledImageViewerAdapter(options: TiledImageViewerOptions):
     beginNavigation(_screenPoint, options) {
       return options.button === 1 || options.button === 2 || options.altKey || options.metaKey
     },
+    beginViewNavigation() {
+      // View-only: any drag pans the image.
+      return true
+    },
     updateNavigation(_screenPoint, delta, viewport) {
       panBy(delta, viewport)
     },

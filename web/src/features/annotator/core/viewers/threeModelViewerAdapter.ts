@@ -645,6 +645,11 @@ export function createThreeModelViewerAdapter(options: ThreeModelViewerOptions):
       }
       return false
     },
+    beginViewNavigation(_screenPoint, navOptions: NavigationOptions) {
+      // View-only: plain drag orbits, shift/middle pans — no drawing to reserve.
+      navigationMode = navOptions.shiftKey || navOptions.button === 1 ? 'pan' : 'orbit'
+      return true
+    },
     updateNavigation(_screenPoint, delta, nextViewport) {
       if (!camera) {
         return

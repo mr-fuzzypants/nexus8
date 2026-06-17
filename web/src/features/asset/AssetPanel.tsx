@@ -1,6 +1,7 @@
 import { ActionIcon, Anchor, Badge, Button, Drawer, Group, Stack, Text, Tooltip } from '@mantine/core';
 import {
   IconExternalLink,
+  IconEye,
   IconHeart,
   IconHeartFilled,
   IconPencil,
@@ -14,6 +15,7 @@ import { listMasks } from '../annotator/annotatorApi';
 import { useLibraryStore } from '../../stores/library';
 import { useBasketStore } from '../../stores/basket';
 import { useProject } from '../projects/ProjectContext';
+import { useViewerStore } from '../viewer/viewerStore';
 import { RelatedSection } from './RelatedSection';
 import { SimilarSection } from './SimilarSection';
 import { VersionsSection } from './VersionsSection';
@@ -90,6 +92,7 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
   const removeFromBasket = useBasketStore((s) => s.remove);
   const [, navigate] = useLocation();
   const { code } = useProject();
+  const openViewer = useViewerStore((s) => s.open);
 
   return (
     <Drawer
@@ -149,18 +152,27 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
           </Group>
 
           {(asset.media_type === 'image' || assetIsVideo(asset) || assetIs3DModel(asset)) && (
-            <Button
-              variant="light"
-              color="teal"
-              leftSection={<IconPencil size={16} stroke={1.75} />}
-              onClick={() => navigate(`~/p/${code}/annotate/${asset.id}`)}
-            >
-              {assetIs3DModel(asset)
-                ? 'Annotate 3D model'
-                : assetIsVideo(asset)
-                  ? 'Annotate video'
-                  : 'Annotate & mask'}
-            </Button>
+            <Group gap="xs" grow>
+              <Button
+                variant="default"
+                leftSection={<IconEye size={16} stroke={1.75} />}
+                onClick={() => openViewer({ asset })}
+              >
+                View
+              </Button>
+              <Button
+                variant="light"
+                color="teal"
+                leftSection={<IconPencil size={16} stroke={1.75} />}
+                onClick={() => navigate(`~/p/${code}/annotate/${asset.id}`)}
+              >
+                {assetIs3DModel(asset)
+                  ? 'Annotate 3D model'
+                  : assetIsVideo(asset)
+                    ? 'Annotate video'
+                    : 'Annotate & mask'}
+              </Button>
+            </Group>
           )}
 
           {(asset.ai_description || asset.description) && (

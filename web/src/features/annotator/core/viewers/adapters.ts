@@ -70,6 +70,17 @@ export interface ViewerAdapter extends AnnotationProjectionHost {
     options: NavigationOptions,
     viewport: ViewportSize,
   ) => boolean
+  /**
+   * Like beginNavigation, but for view-only surfaces where there is no drawing
+   * tool competing for the primary drag. Each adapter starts its most natural
+   * gesture on a plain primary drag (orbit for 3D, pan for 2D/video) and pans on
+   * shift/secondary. Falls back to beginNavigation when unimplemented.
+   */
+  beginViewNavigation?: (
+    screenPoint: Vec2,
+    options: NavigationOptions,
+    viewport: ViewportSize,
+  ) => boolean
   updateNavigation?: (screenPoint: Vec2, delta: Vec2, viewport: ViewportSize) => void
   endNavigation?: () => void
 }

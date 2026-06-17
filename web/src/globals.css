@@ -1,5 +1,16 @@
 /* Design tokens — slate/teal dark theme, ported from toodles/nodegraph/web */
 
+/* While a tear-off viewer is open, drop all backdrop-filters. Chrome re-blurs
+   every backdrop-filter region on each composited frame, so they stutter video
+   playback in the floating viewer. The blur is cosmetic and obscured by the
+   panel anyway. Toggled by FloatingViewerLayer via the `viewer-open` body class. */
+body.viewer-open *,
+body.viewer-open *::before,
+body.viewer-open *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 :root,
 .dark {
   --font-sans: Inter, ui-sans-serif, system-ui, sans-serif;
@@ -659,6 +670,24 @@ body {
 
 .version-row:hover {
   background: var(--accent);
+}
+
+.version-row-wrap {
+  position: relative;
+}
+
+.version-row-view {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.version-row-wrap:hover .version-row-view,
+.version-row-view:focus-visible {
+  opacity: 1;
 }
 
 .version-row.picked {

@@ -1131,6 +1131,10 @@ export function createVideoViewerAdapter(
     beginNavigation(_screenPoint, options) {
       return options.button === 1 || options.altKey || options.shiftKey
     },
+    beginViewNavigation() {
+      // View-only: any drag pans the (possibly zoomed) video frame.
+      return true
+    },
     updateNavigation(_screenPoint, delta, nextViewport) {
       view.offsetX += delta.x
       view.offsetY += delta.y
