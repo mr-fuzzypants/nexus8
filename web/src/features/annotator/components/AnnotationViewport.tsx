@@ -334,6 +334,15 @@ export function AnnotationViewport({
     return adapter.getActions?.() ?? []
   }, [adapter, adapterVersion])
   const statusBadges = adapter.getStatusBadges?.(viewport) ?? []
+  // adapterVersion ticks on every adapter emit (load progress, ready, camera),
+  // so the loading overlay and the ready gate stay live.
+  const loadState = useMemo(() => {
+    void adapterVersion
+    return adapter.getLoadState?.() ?? null
+  }, [adapter, adapterVersion])
+  // Adapters without a load state (image/video) are always drawable; a 3D model
+  // is only drawable once its surface and framing camera are settled.
+  const isViewerReady = !loadState || loadState.status === 'ready'
   const diagnostics = adapter.getDiagnostics?.() ?? []
   const selectedAnnotationIsVisible = Boolean(selectedAnnotation && annotationMatchesViewer(selectedAnnotation, adapter))
   const viewerToolbarGroups = useMemo<ViewerToolbarGroup[]>(() => {
@@ -607,6 +616,11 @@ export function AnnotationViewport({
     canvas.style.height = `${viewport.height}px`
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
     context.clearRect(0, 0, viewport.width, viewport.height)
+    // Hold markers off until the surface is drawable — before a 3D model loads
+    // and frames the camera, anchors would project against an unsettled view.
+    if (!isViewerReady) {
+      return
+    }
     const plan = buildAnnotationSceneRenderPlan({
       projectionHost,
       viewport,
@@ -624,7 +638,7 @@ export function AnnotationViewport({
     })
 
     renderPrimitiveBatchesToCanvas(context, plan.batches)
-  }, [adapter, adapterVersion, dragPreview, draft, inlineEditorId, isInlineEditorOpen, participants, projectionHost, selectedId, viewport, visibleAnnotations])
+  }, [adapter, adapterVersion, dragPreview, draft, inlineEditorId, isInlineEditorOpen, isViewerReady, participants, projectionHost, selectedId, viewport, visibleAnnotations])
 
   function pointerToLocal(event: { clientX: number; clientY: number }) {
     const canvas = overlayCanvasRef.current
@@ -840,6 +854,11 @@ export function AnnotationViewport({
   function handlePointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
     const screenPoint = pointerToLocal(event)
     if (!screenPoint) {
+      return
+    }
+
+    // Ignore input until the viewer surface is drawable (e.g. 3D model still loading).
+    if (!isViewerReady) {
       return
     }
 
@@ -1265,6 +1284,30 @@ export function AnnotationViewport({
         ) : (
           <canvas ref={backgroundCanvasRef} className="viewer-canvas viewer-canvas--background" />
         )}
+        {loadState && loadState.status !== 'ready' ? (
+          <div
+            className={`viewer-loading-overlay viewer-loading-overlay--${loadState.status}`}
+            role="status"
+            aria-live="polite"
+          >
+            <div className="viewer-loading-overlay__inner">
+              {loadState.status === 'error' ? (
+                <span className="viewer-loading-overlay__icon" aria-hidden>!</span>
+              ) : (
+                <span className="viewer-loading-spinner" aria-hidden />
+              )}
+              <span className="viewer-loading-overlay__label">{loadState.label}</span>
+              {loadState.status === 'loading' && loadState.progress !== null ? (
+                <div className="viewer-loading-progress">
+                  <div
+                    className="viewer-loading-progress__bar"
+                    style={{ width: `${Math.round(loadState.progress * 100)}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {inlineEditableSelection && inlineEditorLayout && inlineEditorId === inlineEditableSelection.id ? (
           <div
             className={

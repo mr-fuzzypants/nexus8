@@ -29,6 +29,16 @@ export interface ViewerDiagnosticItem {
   value: string
 }
 
+export type ViewerLoadStatus = 'pending' | 'loading' | 'ready' | 'error'
+
+export interface ViewerLoadState {
+  status: ViewerLoadStatus
+  /** Download fraction in 0..1 when determinate, null when unknown/indeterminate. */
+  progress: number | null
+  /** Human-readable status for a loading overlay. */
+  label: string
+}
+
 export interface ViewerSurfaceController {
   resize: (viewport: ViewportSize) => void
   dispose: () => void
@@ -49,6 +59,8 @@ export interface ViewerAdapter extends AnnotationProjectionHost {
   subscribe?: (listener: () => void) => () => void
   onSelectionChange?: (annotation?: AnnotationEntity) => void
   getStatusBadges?: (viewport: ViewportSize) => string[]
+  /** Reports asset readiness so the viewport can defer annotations until the surface is drawable. */
+  getLoadState?: () => ViewerLoadState
   getDiagnostics?: () => ViewerDiagnosticItem[]
   getActions?: () => ViewerAction[]
   selectSceneObjectAt?: (screenPoint: Vec2, viewport: ViewportSize) => boolean

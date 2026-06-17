@@ -129,6 +129,9 @@ export function createThreeModelViewerAdapter(options: ThreeModelViewerOptions):
   let navigationMode: NavigationMode | null = null
   let renderMode: SceneRenderMode = 'shaded'
   let loadStatus: 'pending' | 'loading' | 'ready' | 'error' = 'pending'
+  // Download fraction in 0..1 while the GLB streams in; null until the first
+  // length-computable progress event (and during the post-download decode phase).
+  let loadProgress: number | null = null
   let pendingFrame: AnnotationFrame | null = null
 
   // Camera-distance bounds are derived from the loaded model's size.
@@ -369,6 +372,7 @@ export function createThreeModelViewerAdapter(options: ThreeModelViewerOptions):
 
   function loadModel() {
     loadStatus = 'loading'
+    loadProgress = null
     emitter.emit()
     gltfLoader.load(
       src,
@@ -383,11 +387,22 @@ export function createThreeModelViewerAdapter(options: ThreeModelViewerOptions):
         scene.add(root)
         modelRoot = root
         loadStatus = 'ready'
+        loadProgress = 1
+        // frameModel() positions the camera to fit the model, then renders and
+        // emits — so annotations only project against a settled camera.
         frameModel()
       },
-      undefined,
+      (event) => {
+        // GLB bytes streaming in. Decode/parse afterwards has no progress events,
+        // so progress pins at 1 (and the overlay flips to an indeterminate label).
+        loadProgress = event.lengthComputable && event.total > 0
+          ? clamp(event.loaded / event.total, 0, 1)
+          : loadProgress
+        emitter.emit()
+      },
       () => {
         loadStatus = 'error'
+        loadProgress = null
         renderScene()
       },
     )
@@ -568,6 +583,7 @@ export function createThreeModelViewerAdapter(options: ThreeModelViewerOptions):
           scene = null
           hostElement = null
           loadStatus = 'pending'
+          loadProgress = null
         },
       }
     },
@@ -593,6 +609,22 @@ export function createThreeModelViewerAdapter(options: ThreeModelViewerOptions):
         `Model ${statusLabel[loadStatus]}`,
         `Render ${renderMode === 'wireframe' ? 'Wireframe' : 'Shaded'}`,
       ]
+    },
+    getLoadState() {
+      let label: string
+      if (loadStatus === 'error') {
+        label = 'Failed to load model'
+      } else if (loadStatus === 'ready') {
+        label = 'Model ready'
+      } else if (loadProgress === null) {
+        label = 'Preparing model…'
+      } else if (loadProgress >= 1) {
+        // Download complete; geometry/textures still decoding (Draco/KTX2).
+        label = 'Preparing model…'
+      } else {
+        label = `Downloading model… ${Math.round(loadProgress * 100)}%`
+      }
+      return { status: loadStatus, progress: loadProgress, label }
     },
     selectSceneObjectAt() {
       return false
