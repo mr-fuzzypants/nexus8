@@ -32,6 +32,45 @@ export async function getVersionHistory(assetId: number): Promise<VersionHistory
   return data;
 }
 
+// -- provenance (Tier-3 reproduction manifest) --------------------------------
+
+export interface ProvenanceIngredient {
+  code: string;
+  entity_type: string;
+  symlink_used: string;
+  pinned_version: number;
+  content_hash: string;
+}
+
+export interface Provenance {
+  output: { code: string; version: number; seed: number | null; content_hash: string };
+  batch: {
+    code: string;
+    version: number;
+    published_at: string;
+    params: { environment?: Record<string, string>; seeds?: Record<string, number> };
+  };
+  ingredients: Record<string, ProvenanceIngredient>;
+}
+
+/** Forward lineage: what run/workflow/checkpoint/seed produced this asset.
+ *  Returns `{ provenance: null }` for assets not generated through nexus8. */
+export async function getProvenance(
+  assetId: number,
+): Promise<Provenance | { provenance: null }> {
+  const { data } = await http.get(`/trackables/api/library/assets/${assetId}/provenance/`);
+  return data;
+}
+
+/** Re-run the workflow that produced this asset, pinned to its manifest.
+ *  Proxied through nexus8 to the nodegraph engine; returns the new run id. */
+export async function reproduceAsset(
+  assetCode: string,
+): Promise<{ status: string; runId: string; workflow: string }> {
+  const { data } = await http.post('/trackables/api/runs/reproduce/', { asset_code: assetCode });
+  return data;
+}
+
 export async function uploadVersion(
   assetId: number,
   file: File,

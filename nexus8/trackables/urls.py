@@ -65,6 +65,15 @@ from .views_projects import (
     ProjectDetailView,
     ProjectListView,
 )
+from .views_blob import BlobResolveView
+from .views_workflow import WorkflowDetailView, WorkflowRegisterView
+from .views_runs import (
+    AssetProvenanceView,
+    EntityConsumersView,
+    ReproduceView,
+    RunManifestView,
+    RunPublishView,
+)
 from .views_intelligence import (
     AssetRelationsView,
     AssetSimilarView,
@@ -110,6 +119,18 @@ urlpatterns = [
     path('api/library/root-entities/', RootEntitiesView.as_view(), name='library-root-entities'),
     path('api/library/smart-collections/', SmartCollectionListView.as_view(), name='library-smart-collections'),
     path('api/library/smart-collections/<int:pk>/', SmartCollectionDetailView.as_view(), name='library-smart-collection'),
+    # Blob resolution for external engines (nodegraph nexus8:// driver)
+    path('api/blob/resolve/', BlobResolveView.as_view(), name='blob-resolve'),
+    # Workflow registration / fetch (nodegraph_workflow entities)
+    path('api/workflows/', WorkflowRegisterView.as_view(), name='workflow-register'),
+    path('api/workflows/<str:code>/', WorkflowDetailView.as_view(), name='workflow-detail'),
+    # Run batches + provenance (Tier-3 reproducibility)
+    path('api/runs/', RunPublishView.as_view(), name='run-publish'),
+    path('api/runs/manifest/', RunManifestView.as_view(), name='run-manifest'),
+    path('api/runs/reproduce/', ReproduceView.as_view(), name='run-reproduce'),
+    # Lineage views for the SPA: forward (what made this) + reverse (what used this)
+    path('api/library/assets/<int:pk>/provenance/', AssetProvenanceView.as_view(), name='asset-provenance'),
+    path('api/library/entities/<str:code>/consumers/', EntityConsumersView.as_view(), name='entity-consumers'),
     # API endpoints
     path('api/', include(router.urls)),
 ]

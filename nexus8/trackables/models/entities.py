@@ -76,6 +76,21 @@ class VersionedEntity(Trackable):
     path = models.CharField(max_length=1000, blank=True, default="")
     depth = models.PositiveIntegerField(default=0)
 
+    # Project membership (hard partition). A self-FK to the owning project row
+    # (entity_type='project'), keyed by ``code`` so the column stores the same
+    # project code that used to live in ``type_data.project_code``. SET_NULL so
+    # deleting a project orphans its entities rather than cascading.
+    project = models.ForeignKey(
+        "self",
+        to_field="code",
+        db_column="project_code",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="entities",
+        limit_choices_to={"entity_type": "project"},
+    )
+
     objects = models.Manager()
 
     entity_type_key = DEFAULT_ENTITY_TYPE
@@ -121,6 +136,14 @@ class VersionedEntity(Trackable):
 
     def __str__(self):
         return f"{self.code} ({self.name})"
+
+    @property
+    def project_code(self):
+        """The owning project's ``code`` (now stored via the ``project`` FK).
+
+        Read-only back-compat shim for serializers; write via ``project_id``.
+        """
+        return self.project_id
 
     @classmethod
     def from_db(cls, db, field_names, values):
@@ -616,7 +639,7 @@ class MediaAsset(VersionedEntity):
             semantic_embedding__isnull=False, ai_analysis_status="completed"
         )
         if project_code:
-            queryset = queryset.filter(versions__data__project_code=project_code)
+            queryset = queryset.filter(project_id=project_code)
 
         queryset = (
             queryset.annotate(
@@ -701,7 +724,7 @@ class MediaAsset(VersionedEntity):
 
     def get_project_context(self):
         return {
-            "project_code": (self.type_data or {}).get("project_code", "unknown"),
+            "project_code": self.project_code or "unknown",
             "department": (self.type_data or {}).get("department", "unknown"),
             "production_stage": self.production_stage or "unknown",
         }

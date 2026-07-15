@@ -3,7 +3,7 @@ import { Link, useParams } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
 import { ActionIcon, Badge, Text, Tooltip } from '@mantine/core';
 import { IconArrowLeft } from '@tabler/icons-react';
-import { getEntity } from '../../api/intelligence';
+import { getConsumers, getEntity } from '../../api/intelligence';
 import type { AssetSummary } from '../../api/library';
 import { AssetGrid } from '../grid/AssetGrid';
 import { AssetPanel } from '../asset/AssetPanel';
@@ -18,6 +18,13 @@ export function EntityPage() {
     queryKey: ['entity', entityId],
     queryFn: () => getEntity(entityId),
     enabled: Number.isFinite(entityId),
+  });
+
+  const code = entity.data?.code;
+  const consumers = useQuery({
+    queryKey: ['consumers', code],
+    queryFn: () => getConsumers(code!),
+    enabled: !!code,
   });
 
   if (entity.isError) {
@@ -46,6 +53,20 @@ export function EntityPage() {
               {entity.data?.assets.length ?? 0} related asset
               {(entity.data?.assets.length ?? 0) === 1 ? '' : 's'}
             </Text>
+            {(consumers.data?.consumer_count ?? 0) > 0 && (
+              <Tooltip
+                label={consumers.data!.consumers
+                  .slice(0, 12)
+                  .map((c) => c.code)
+                  .join('\n')}
+                multiline
+              >
+                <Badge variant="light" color="grape">
+                  Used by {consumers.data!.consumer_count} output
+                  {consumers.data!.consumer_count === 1 ? '' : 's'}
+                </Badge>
+              </Tooltip>
+            )}
           </div>
         </header>
 

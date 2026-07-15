@@ -122,7 +122,7 @@ class EntityListView(APIView):
             entities = entities.filter(type_data__category=category)
         project = request.query_params.get("project")
         if project:
-            entities = entities.filter(type_data__project_code=project)
+            entities = entities.filter(project_id=project)
 
         payload = []
         for entity in entities[:500]:
@@ -149,15 +149,13 @@ class EntityListView(APIView):
                 {"detail": f"name and category (one of {ENTITY_CATEGORIES}) required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        type_data = {"category": category}
         project = (request.data.get("project_code") or "").strip()
-        if project:
-            type_data["project_code"] = project
         entity = VersionedEntity.objects.create(
             entity_type="entity",
             code=f"{category}_{_slug(name)}_{uuid.uuid4().hex[:6]}",
             name=name,
-            type_data=type_data,
+            type_data={"category": category},
+            project_id=project or None,
         )
         return Response(entity_summary(entity, asset_count=0), status=status.HTTP_201_CREATED)
 
@@ -238,7 +236,7 @@ class SmartCollectionListView(APIView):
         collections = SmartCollection.objects.active().order_by("-created_at")
         project = request.query_params.get("project")
         if project:
-            collections = collections.filter(type_data__project_code=project)
+            collections = collections.filter(project_id=project)
         return Response([smart_collection_summary(c) for c in collections])
 
     def post(self, request):
@@ -246,14 +244,12 @@ class SmartCollectionListView(APIView):
         query = (request.data.get("query") or "").strip()
         if not name:
             return Response({"detail": "name required"}, status=status.HTTP_400_BAD_REQUEST)
-        type_data = {"query": query}
         project = (request.data.get("project") or "").strip()
-        if project:
-            type_data["project_code"] = project
         collection = SmartCollection.objects.create(
             code=f"smart_{uuid.uuid4().hex[:10]}",
             name=name,
-            type_data=type_data,
+            type_data={"query": query},
+            project_id=project or None,
         )
         return Response(smart_collection_summary(collection), status=status.HTTP_201_CREATED)
 
@@ -400,6 +396,6 @@ class RootEntitiesView(APIView):
             entities = entities.filter(type_data__category=category)
         project = request.query_params.get("project")
         if project:
-            entities = entities.filter(type_data__project_code=project)
+            entities = entities.filter(project_id=project)
 
         return Response([entity_summary(e) for e in entities])

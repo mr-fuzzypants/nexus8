@@ -78,6 +78,7 @@ from .generation import (
     GenerationRecipe,
     LoraAdapter,
     ModelCheckpoint,
+    NodegraphWorkflow,
     PromptTemplate,
     reproduction_manifest,
 )
@@ -111,6 +112,7 @@ __all__ = [
     "LoraAdapter",
     "MediaAsset",
     "ModelCheckpoint",
+    "NodegraphWorkflow",
     "PROJECT_STATUSES",
     "Project",
     "PromptTemplate",

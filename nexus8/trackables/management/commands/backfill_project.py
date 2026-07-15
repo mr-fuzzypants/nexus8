@@ -1,8 +1,8 @@
 """
 Assign existing entities/assets to a project (hard-partition backfill).
 
-Rows created before projects existed have no ``type_data.project_code`` and so
-appear in no project. This command stamps a project code onto every such row.
+Rows created before projects existed have no ``project`` FK set and so appear
+in no project. This command stamps a project onto every such row.
 
     # Move all unscoped entities + assets into a new "Unsorted" project
     python manage.py backfill_project
@@ -13,7 +13,7 @@ appear in no project. This command stamps a project code onto every such row.
     # Limit which entity types get backfilled
     python manage.py backfill_project --types entity,media_asset,board
 
-Idempotent: rows that already carry a project_code are left untouched.
+Idempotent: rows that already belong to a project are left untouched.
 """
 
 import uuid
@@ -65,11 +65,11 @@ class Command(BaseCommand):
         project = self._resolve_project(options, dry_run)
         project_code = project.code if project else f"<new:{_slug(options['name'])}>"
 
-        # Unscoped = no project_code key, or an empty/blank value.
+        # Unscoped = no project FK set.
         candidates = (
             VersionedEntity.objects.filter(entity_type__in=entity_types)
             .filter(archived_at__isnull=True)
-            .exclude(type_data__has_key="project_code")
+            .filter(project_id__isnull=True)
         )
 
         total = candidates.count()
@@ -93,10 +93,8 @@ class Command(BaseCommand):
         updated = 0
         with transaction.atomic():
             for entity in candidates.iterator(chunk_size=500):
-                data = dict(entity.type_data or {})
-                data["project_code"] = project.code
-                entity.type_data = data
-                entity.save(update_fields=["type_data", "updated_at"])
+                entity.project_id = project.code
+                entity.save(update_fields=["project", "updated_at"])
                 updated += 1
 
         self.stdout.write(

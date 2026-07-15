@@ -237,13 +237,14 @@ class Command(BaseCommand):
             "placeholder": placeholder,
             "technical_metadata": technical,
             "tags": tags or [],
-            "project_code": PROJECT_CODE,
         }
         if department:
             type_data["department"] = department
         if category:
             type_data["category"] = category
-        asset = MediaAsset.objects.create(code=f"{PREFIX}{code}", name=name, type_data=type_data)
+        asset = MediaAsset.objects.create(
+            code=f"{PREFIX}{code}", name=name, type_data=type_data, project_id=PROJECT_CODE
+        )
         asset.publish(
             data={
                 "file_path": stored["file_path"],
@@ -347,8 +348,8 @@ class Command(BaseCommand):
         # Scope every folder in the tree to the project too.
         containers = [project, *project.get_descendants_by_path()]
         for c in containers:
-            c.type_data = {**(c.type_data or {}), "project_code": PROJECT_CODE}
-            c.save(update_fields=["type_data", "updated_at"])
+            c.project_id = PROJECT_CODE
+            c.save(update_fields=["project", "updated_at"])
             self.stdout.write(f"{'  ' * c.depth}{c.path}")
 
         # -- descriptive entities -------------------------------------------
@@ -362,7 +363,7 @@ class Command(BaseCommand):
         ]:
             ent = VersionedEntity.objects.create(
                 entity_type="entity", code=f"{PREFIX}{code}", name=name,
-                type_data={"category": category, "project_code": PROJECT_CODE},
+                type_data={"category": category}, project_id=PROJECT_CODE,
             )
             entities[code] = ent
             self.stdout.write(f"  {category:<10} {name}")
@@ -500,7 +501,7 @@ class Command(BaseCommand):
         def _entity_version(code, name, category):
             ent = VersionedEntity.objects.create(
                 entity_type="entity", code=f"{PREFIX}{code}", name=name,
-                type_data={"category": category, "project_code": PROJECT_CODE},
+                type_data={"category": category}, project_id=PROJECT_CODE,
             )
             ent.publish()
             return ent, ent.versions.order_by("-version_number").first()

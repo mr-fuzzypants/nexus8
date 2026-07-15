@@ -18,6 +18,7 @@ Facets are aggregated in Python over the filtered set (capped). Fine for the
 current scale; move to SQL jsonb aggregation when libraries get large.
 """
 
+import json
 import re
 import uuid
 from collections import Counter
@@ -33,9 +34,57 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Board, Container, EntityRelation, MediaAsset
+from .models import (
+    Board,
+    Container,
+    EntityRelation,
+    GENERATED_FROM_BATCH,
+    MediaAsset,
+    Version,
+    VersionLink,
+)
 from .services.ai_intelligence import ai_service
 from .services.ingest import ingest_file
+
+
+def _attach_run_lineage(asset, batch_version, seed, prompt_variables, actor):
+    """Link an ingested output to the run batch that produced it + record seed.
+
+    Writes the ``generated_from_batch`` lineage edge that makes
+    ``reproduction_manifest()`` work on the output, and stamps the per-run
+    facts (seed, prompt variables) onto the output version's ``generation`` blob.
+    """
+    try:
+        output_version = asset.resolve_symlink("latest")
+    except Exception:
+        output_version = asset.versions.first()
+    if output_version is None:
+        return
+
+    VersionLink.objects.get_or_create(
+        from_version=batch_version,
+        to_version=output_version,
+        role=GENERATED_FROM_BATCH,
+    )
+
+    generation = dict((output_version.data or {}).get("generation") or {})
+    if seed is not None and seed != "":
+        try:
+            generation["seed"] = int(seed)
+        except (TypeError, ValueError):
+            generation["seed"] = seed
+    if prompt_variables:
+        if isinstance(prompt_variables, str):
+            try:
+                prompt_variables = json.loads(prompt_variables)
+            except ValueError:
+                pass
+        generation["prompt_variables"] = prompt_variables
+    if generation:
+        data = dict(output_version.data or {})
+        data["generation"] = generation
+        output_version.data = data
+        output_version.save(update_fields=["data", "updated_at"])
 
 TOKEN_PATTERN = re.compile(r'(\w+):("[^"]*"|\S+)')
 FACET_SCAN_CAP = 5000
@@ -84,7 +133,7 @@ def asset_summary(asset):
         "tags": tags,
         "ai_description": data.get("ai_generated_description", ""),
         "ai_analysis_status": asset.ai_analysis_status,
-        "project_code": data.get("project_code", ""),
+        "project_code": asset.project_code or "",
         "created_at": asset.created_at.isoformat(),
     }
 
@@ -104,15 +153,26 @@ class LibraryUploadView(APIView):
         # Optional hard-partition scope: stamp uploads into the active project.
         project = (request.data.get("project") or "").strip()
 
+        # Optional run lineage: link ingested outputs back to the generation
+        # batch that produced them (Tier-3 provenance). Absent → plain ingest.
+        actor = request.user if request.user.is_authenticated else None
+        batch_version_id = request.data.get("batch_version_id")
+        seed = request.data.get("seed")
+        prompt_variables = request.data.get("prompt_variables")
+        batch_version = (
+            Version.objects.filter(pk=batch_version_id).first()
+            if batch_version_id
+            else None
+        )
+
         created, duplicates = [], []
         for uploaded in files:
-            asset, was_created = ingest_file(
-                uploaded,
-                created_by=request.user if request.user.is_authenticated else None,
-            )
-            if project and (asset.type_data or {}).get("project_code") != project:
-                asset.type_data = {**(asset.type_data or {}), "project_code": project}
-                asset.save(update_fields=["type_data", "updated_at"])
+            asset, was_created = ingest_file(uploaded, created_by=actor)
+            if project and asset.project_id != project:
+                asset.project_id = project
+                asset.save(update_fields=["project", "updated_at"])
+            if batch_version is not None:
+                _attach_run_lineage(asset, batch_version, seed, prompt_variables, actor)
             (created if was_created else duplicates).append(asset_summary(asset))
 
         return Response(
@@ -156,7 +216,7 @@ class LibrarySearchView(APIView):
         # Hard project partition: scope every result to one project when asked.
         project = params.get("project")
         if project:
-            queryset = queryset.filter(type_data__project_code=project)
+            queryset = queryset.filter(project_id=project)
 
         for media_type in tokens.pop("type", []):
             queryset = queryset.filter(type_data__media_type=media_type)
@@ -362,7 +422,7 @@ class BoardListView(APIView):
         boards = Board.objects.active().order_by("-updated_at")
         project = request.query_params.get("project")
         if project:
-            boards = boards.filter(type_data__project_code=project)
+            boards = boards.filter(project_id=project)
         return Response(
             [{**board_summary(b), "preview_thumbs": preview_thumbs(b)} for b in boards]
         )
@@ -370,14 +430,12 @@ class BoardListView(APIView):
     def post(self, request):
         name = (request.data.get("name") or "Untitled board").strip()
         canvas = request.data.get("canvas") or {"items": []}
-        type_data = {"canvas": canvas}
         project = (request.data.get("project") or "").strip()
-        if project:
-            type_data["project_code"] = project
         board = Board.objects.create(
             code=f"board_{uuid.uuid4().hex[:10]}",
             name=name,
-            type_data=type_data,
+            type_data={"canvas": canvas},
+            project_id=project or None,
         )
         return Response(board_detail(board), status=status.HTTP_201_CREATED)
 
@@ -438,7 +496,7 @@ class CollectionCreateView(APIView):
         container = Container.objects.create(
             code=f"collection_{uuid.uuid4().hex[:10]}",
             name=name,
-            type_data={"project_code": project} if project else {},
+            project_id=project or None,
         )
         container.publish(
             data={"assets": asset_ids, "source": "basket"},

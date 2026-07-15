@@ -87,6 +87,25 @@ class GenerationRecipe(VersionedEntity):
     engine_version = json_property("engine_version", default="")
 
 
+@register_entity_type("nodegraph_workflow", version_payload=require_keys("graph"))
+class NodegraphWorkflow(VersionedEntity):
+    """
+    A node-graph workflow (e.g. a nodegraph saved-graph document). Each version
+    is a full snapshot of the graph JSON, so the version alone reproduces the
+    topology *and* every inline value (prompts, seed, sampler settings). External
+    blob ingredients the graph only *references* (checkpoints, init images) are
+    pinned separately when a run publishes its generation batch.
+    """
+
+    objects = EntityTypeManager("nodegraph_workflow")
+
+    class Meta:
+        proxy = True
+
+    engine = json_property("engine", default="nodegraph")
+    schema_version = json_property("schema_version", default="")
+
+
 def reproduction_manifest(output_version):
     """
     Everything needed to regenerate an output, derived from its version row.
@@ -97,9 +116,13 @@ def reproduction_manifest(output_version):
     publish time, and the lineage edge is RESTRICT-protected against the
     batch version being deleted while outputs exist.
     """
+    # Deterministic outputs dedup to one asset even across runs, so the same
+    # output can link to several batches. Resolve to the most recent producing
+    # batch (freshest provenance / environment).
     link = (
         output_version.upstream_links.filter(role=GENERATED_FROM_BATCH)
         .select_related("from_version__entity")
+        .order_by("-created_at")
         .first()
     )
     if link is None:
@@ -140,6 +163,10 @@ def reproduction_manifest(output_version):
             "code": batch_version.entity.code,
             "version": batch_version.version_number,
             "published_at": batch_version.created_at.isoformat(),
+            # Run params: the execution environment (library versions, device,
+            # dtype) and per-sampler seeds. Reproducibility only holds under a
+            # matching environment, so it travels with the manifest.
+            "params": (batch_version.data or {}).get("params", {}),
         },
         "ingredients": ingredients,
     }

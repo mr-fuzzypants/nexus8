@@ -6,9 +6,9 @@ Project endpoints for the reference-platform SPA (web/).
                                           entities-by-category + recent assets
   POST     /library/projects/<code>/assign/  stamp project_code on entities/assets
 
-Projects are the top-level scope. Membership is the denormalized
-``type_data.project_code`` on each entity/asset row, so every query here is a
-single filter over the shared entity table — no joins.
+Projects are the top-level scope. Membership is the ``project`` self-FK on each
+entity/asset row (db column ``project_code``, keyed by the project's code), so
+every query here is a single indexed filter over the shared entity table.
 """
 
 import uuid
@@ -31,7 +31,7 @@ CATEGORY_THUMBS = 4
 
 def _scoped(queryset, code):
     """Restrict a VersionedEntity queryset to one project (hard partition)."""
-    return queryset.filter(type_data__project_code=code)
+    return queryset.filter(project_id=code)
 
 
 def _thumb(asset):
@@ -187,13 +187,8 @@ class ProjectAssignView(APIView):
 
         updated = 0
         for entity in VersionedEntity.objects.filter(pk__in=ids):
-            data = dict(entity.type_data or {})
-            if project is None:
-                data.pop("project_code", None)
-            else:
-                data["project_code"] = project.code
-            entity.type_data = data
-            entity.save(update_fields=["type_data", "updated_at"])
+            entity.project_id = project.code if project else None
+            entity.save(update_fields=["project", "updated_at"])
             updated += 1
 
         return Response({"updated": updated, "project_code": project.code if project else None})

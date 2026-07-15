@@ -1,12 +1,13 @@
 """
 Projects: the top-level scope that owns entities and assets.
 
-An entity type, not a table. Every entity/asset belongs to exactly one project
-(hard partition) via ``type_data.project_code`` on the row; a project's own
+An entity type, not a table. Every entity/asset belongs to at most one project
+(hard partition) via the ``project`` self-FK on the row (db column
+``project_code``, keyed by the project's ``code``); a project's own
 ``type_data`` carries presentation/state attributes for its landing page.
 
-Membership is denormalized onto the row (not a join) so per-project listing is
-a single ``filter(type_data__project_code=...)`` over the shared entity table.
+The FK column stores the project code directly, so per-project listing is a
+single indexed ``filter(project_id=...)`` over the shared entity table.
 """
 
 from .base import EntityTypeManager, json_property, register_entity_type

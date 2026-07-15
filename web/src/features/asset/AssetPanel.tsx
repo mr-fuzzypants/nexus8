@@ -19,6 +19,7 @@ import { useViewerStore } from '../viewer/viewerStore';
 import { RelatedSection } from './RelatedSection';
 import { SimilarSection } from './SimilarSection';
 import { VersionsSection } from './VersionsSection';
+import { ProvenanceSection } from './ProvenanceSection';
 import { DependenciesSection } from './DependenciesSection';
 import { ActivitySection } from './ActivitySection';
 
@@ -200,6 +201,7 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
           <RelatedSection asset={asset} />
           <SimilarSection asset={asset} onOpenAsset={(a) => onOpenAsset?.(a)} />
           <VersionsSection asset={asset} onAssetUpdated={(a) => onOpenAsset?.(a)} />
+          <ProvenanceSection asset={asset} />
           <DependenciesSection asset={asset} />
           <ActivitySection asset={asset} />
 
