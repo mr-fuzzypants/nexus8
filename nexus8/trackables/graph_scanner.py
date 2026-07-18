@@ -117,11 +117,12 @@ def _extract_port_values(raw: dict) -> dict:
     """
     Extract port input values from a raw node dict.
 
-    nodegraph stores input port values in ``inputs.{port_name}.value`` or
-    directly in ``parameters.{port_name}``.  We check both locations.
+    Handles two formats:
+    - Dict format (stub graphs): ``{"inputs": {"port_name": {"value": ...}}}``
+    - List format (nodegraph native): ``{"inputs": [{"name": "port", "value": ...}]}``
+    Also checks ``parameters``/``params`` as a fallback.
     """
     values: dict = {}
-    # Nested ports structure: {"inputs": {"port_name": {"value": ...}}}
     inputs = raw.get("inputs") or {}
     if isinstance(inputs, dict):
         for port_name, port_data in inputs.items():
@@ -129,6 +130,11 @@ def _extract_port_values(raw: dict) -> dict:
                 values[port_name] = port_data["value"]
             else:
                 values[port_name] = port_data
+    elif isinstance(inputs, list):
+        # nodegraph native format: list of port objects with "name" + "value".
+        for port in inputs:
+            if isinstance(port, dict) and "name" in port:
+                values[port["name"]] = port.get("value")
     # Flat parameters dict (alternative format).
     params = raw.get("parameters") or raw.get("params") or {}
     if isinstance(params, dict):
