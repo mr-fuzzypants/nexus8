@@ -15,6 +15,7 @@ import {
 import { Menu, Text } from '@mantine/core';
 import clsx from 'clsx';
 import { BasketRail } from './BasketRail';
+import { RunWorkflowPanel } from '../features/workflows/RunWorkflowPanel';
 import { FloatingViewerLayer } from '../features/viewer/FloatingViewerLayer';
 import { useProject } from '../features/projects/ProjectContext';
 
@@ -147,6 +148,7 @@ export function Shell({ children }: { children: ReactNode }) {
       </main>
       <BasketRail />
       <FloatingViewerLayer />
+      <RunWorkflowPanel />
     </div>
   );
 }

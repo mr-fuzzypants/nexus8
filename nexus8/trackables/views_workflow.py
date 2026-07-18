@@ -103,6 +103,13 @@ class WorkflowRegisterView(APIView):
             content_hash=content_hash,
             created_by=actor,
         )
+
+        # Keep "follow latest" attachments in sync with the newly scanned interface.
+        from .models import WorkflowAttachment
+        WorkflowAttachment.objects.filter(
+            workflow=entity, workflow_version__isnull=True
+        ).update(graph_interface=scanned)
+
         return Response(
             {
                 "code": code,

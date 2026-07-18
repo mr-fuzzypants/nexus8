@@ -76,6 +76,7 @@ from .views_runs import (
 )
 from .views_intents import (
     AssetBrowseView,
+    CloneIntentView,
     DispatchIntentView,
     EntityReferenceSlotsView,
     EntityReferenceSlotDetailView,
@@ -141,6 +142,7 @@ urlpatterns = [
     path('api/intents/<int:pk>/', IntentDetailView.as_view(), name='intent-detail'),
     path('api/intents/<int:pk>/status/', IntentStatusView.as_view(), name='intent-status'),
     path('api/intents/<int:pk>/dispatch/', DispatchIntentView.as_view(), name='intent-dispatch'),
+    path('api/intents/<int:pk>/clone/', CloneIntentView.as_view(), name='intent-clone'),
     path('api/intents/entities/<str:code>/reference-slots/', EntityReferenceSlotsView.as_view(), name='entity-reference-slots'),
     path('api/intents/entities/<str:code>/reference-slots/<str:slot>/', EntityReferenceSlotDetailView.as_view(), name='entity-reference-slot-detail'),
     path('api/intents/browse/', AssetBrowseView.as_view(), name='intent-browse'),

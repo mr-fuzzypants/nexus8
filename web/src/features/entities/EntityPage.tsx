@@ -8,6 +8,8 @@ import type { AssetSummary } from '../../api/library';
 import { AssetGrid } from '../grid/AssetGrid';
 import { AssetPanel } from '../asset/AssetPanel';
 import { ContainerBrowser } from './ContainerBrowser';
+import { ReferencesSection } from '../workflows/ReferencesSection';
+import { WorkflowsSection } from '../workflows/WorkflowsSection';
 
 export function EntityPage() {
   const params = useParams<{ id: string }>();
@@ -69,6 +71,15 @@ export function EntityPage() {
             )}
           </div>
         </header>
+
+        {entity.data && <ReferencesSection entity={entity.data} />}
+        {entity.data?.category === 'shot' && (
+          <div style={{ padding: '12px 16px 0' }}>
+            <WorkflowsSection
+              target={{ kind: 'shot', shotCode: entity.data.code, shotName: entity.data.name }}
+            />
+          </div>
+        )}
 
         <AssetGrid
           assets={entity.data?.assets ?? []}

@@ -26,6 +26,7 @@ import {
 import { createBoard, createCollection } from '../api/boards';
 import { SLOTS, basketManifest, basketToCanvas, useBasketStore } from '../stores/basket';
 import { useProject } from '../features/projects/ProjectContext';
+import { endAssetDrag, startAssetDrag } from '../features/workflows/dnd';
 
 function downloadJson(payload: object, filename: string) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -126,7 +127,13 @@ export function BasketRail() {
             <div key={slot}>
               <div className="basket-slot-label">{slot}</div>
               {groupItems.map(({ asset }) => (
-                <div key={asset.id} className="basket-item">
+                <div
+                  key={asset.id}
+                  className="basket-item"
+                  draggable
+                  onDragStart={(e) => startAssetDrag(e, asset)}
+                  onDragEnd={endAssetDrag}
+                >
                   <img
                     src={asset.thumbnails['256'] || asset.file_path || asset.placeholder}
                     alt=""

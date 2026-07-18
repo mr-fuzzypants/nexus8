@@ -738,6 +738,42 @@ class IntentDetailView(APIView):
         return Response(_intent_dict(intent))
 
 
+class CloneIntentView(APIView):
+    """
+    POST /api/intents/<id>/clone/
+
+    Create an exact clone of an existing intent for deterministic reproduction.
+
+    The clone is created with identical node_pins, params, seed, armed_pins,
+    output_bindings, and on_ambiguity — guaranteeing the same inputs are used
+    even if the library has changed since the original run.  The clone starts
+    as 'pending'; dispatch it separately to execute.
+
+    Optionally pass ``{"newSeed": 12345}`` in the body to vary only the seed
+    (useful for re-running with a different random while keeping all inputs).
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        source = get_object_or_404(RunIntent, pk=pk)
+        actor = request.user if request.user.is_authenticated else None
+        seed = request.data.get("newSeed", source.seed)
+        clone = RunIntent.objects.create(
+            attachment=source.attachment,
+            target_asset=source.target_asset,
+            status="pending",
+            node_pins=source.node_pins,
+            params=source.params,
+            seed=seed,
+            armed_pins=source.armed_pins,
+            output_bindings=source.output_bindings,
+            on_ambiguity=source.on_ambiguity,
+            created_by=actor,
+        )
+        return Response(_intent_dict(clone), status=status.HTTP_201_CREATED)
+
+
 class IntentStatusView(APIView):
     """
     PATCH /api/intents/<id>/status/
@@ -979,11 +1015,10 @@ class DispatchIntentView(APIView):
         node_id = body_data.get("nodeId")
 
         # Build the request payload that nodegraph expects.
+        # Only intent_id — nodegraph fetches the full intent from nexus8 if it
+        # needs params.  Sending params here caused a 422 because nodegraph's
+        # execute endpoint expects params as a list, not a dict.
         run_body = {"intent_id": str(intent.id)}
-        # Include the intent's params so the view-layer picks them up even if
-        # the consumer is using a Control Surface View (not a raw execute endpoint).
-        if intent.params:
-            run_body["params"] = intent.params
 
         if network_id and node_id:
             ng_url = f"{nodegraph_base}/api/networks/{network_id}/execute/{node_id}"

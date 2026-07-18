@@ -807,3 +807,19 @@ body {
   object-fit: cover;
   display: block;
 }
+
+/* Workflow run panel: query-strip items get a hover-revealed remove button. */
+.wf-strip-item {
+  position: relative;
+}
+
+.wf-strip-item .wf-strip-remove {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: none;
+}
+
+.wf-strip-item:hover .wf-strip-remove {
+  display: flex;
+}

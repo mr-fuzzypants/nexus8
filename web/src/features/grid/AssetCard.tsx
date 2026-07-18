@@ -10,6 +10,7 @@ import clsx from 'clsx';
 import { thumbUrl, type AssetSummary } from '../../api/library';
 import { useLibraryStore } from '../../stores/library';
 import { useBasketStore } from '../../stores/basket';
+import { endAssetDrag, startAssetDrag } from '../workflows/dnd';
 
 interface AssetCardProps {
   asset: AssetSummary;
@@ -46,6 +47,9 @@ export function AssetCard({ asset, left, top, width, height, onOpen }: AssetCard
         height,
         backgroundImage: asset.placeholder ? `url(${asset.placeholder})` : undefined,
       }}
+      draggable
+      onDragStart={(e) => startAssetDrag(e, asset)}
+      onDragEnd={endAssetDrag}
       onClick={() => onOpen(asset)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {

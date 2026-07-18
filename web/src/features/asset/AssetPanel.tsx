@@ -22,6 +22,8 @@ import { VersionsSection } from './VersionsSection';
 import { ProvenanceSection } from './ProvenanceSection';
 import { DependenciesSection } from './DependenciesSection';
 import { ActivitySection } from './ActivitySection';
+import { WorkflowsSection } from '../workflows/WorkflowsSection';
+import { RunHistorySection } from '../workflows/RunHistorySection';
 
 interface AssetPanelProps {
   asset: AssetSummary | null;
@@ -202,6 +204,8 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
           <SimilarSection asset={asset} onOpenAsset={(a) => onOpenAsset?.(a)} />
           <VersionsSection asset={asset} onAssetUpdated={(a) => onOpenAsset?.(a)} />
           <ProvenanceSection asset={asset} />
+          <WorkflowsSection target={{ kind: 'asset', asset }} onRunOpen={onClose} />
+          <RunHistorySection asset={asset} />
           <DependenciesSection asset={asset} />
           <ActivitySection asset={asset} />
 

@@ -9,7 +9,6 @@ import {
   Material,
   Mesh,
   MeshBasicMaterial,
-  MeshStandardMaterial,
   Object3D,
   PerspectiveCamera,
   Plane,
