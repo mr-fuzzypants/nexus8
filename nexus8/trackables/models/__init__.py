@@ -89,6 +89,11 @@ from .maintenance import (
 from .container_links import (
     DependencyLink,
 )
+from .workflows import (
+    EntityReferenceSlot,
+    WorkflowAttachment,
+    RunIntent,
+)
 
 __all__ = [
     "AI_STATUS_CHOICES",
@@ -105,6 +110,7 @@ __all__ = [
     "ContainerVersion",
     "ContainerVersionManager",
     "DependencyLink",
+    "EntityReferenceSlot",
     "EntityRelation",
     "EntityTypeManager",
     "GenerationRecipe",
@@ -113,6 +119,7 @@ __all__ = [
     "MediaAsset",
     "ModelCheckpoint",
     "NodegraphWorkflow",
+    "RunIntent",
     "PROJECT_STATUSES",
     "Project",
     "PromptTemplate",
@@ -143,4 +150,5 @@ __all__ = [
     "resolve_symlink_at",
     "update_symlink",
     "validate_materialized_paths",
+    "WorkflowAttachment",
 ]

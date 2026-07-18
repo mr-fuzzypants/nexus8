@@ -74,6 +74,18 @@ from .views_runs import (
     RunManifestView,
     RunPublishView,
 )
+from .views_intents import (
+    AssetBrowseView,
+    DispatchIntentView,
+    EntityReferenceSlotsView,
+    EntityReferenceSlotDetailView,
+    IntentDetailView,
+    IntentListView,
+    IntentStatusView,
+    ResolveView,
+    WorkflowAttachmentDetailView,
+    WorkflowAttachmentListView,
+)
 from .views_intelligence import (
     AssetRelationsView,
     AssetSimilarView,
@@ -121,6 +133,17 @@ urlpatterns = [
     path('api/library/smart-collections/<int:pk>/', SmartCollectionDetailView.as_view(), name='library-smart-collection'),
     # Blob resolution for external engines (nodegraph nexus8:// driver)
     path('api/blob/resolve/', BlobResolveView.as_view(), name='blob-resolve'),
+    # Intent-first orchestration: attachments, resolve, intents, reference slots, browse
+    path('api/intents/attachments/', WorkflowAttachmentListView.as_view(), name='workflow-attachments'),
+    path('api/intents/attachments/<int:pk>/', WorkflowAttachmentDetailView.as_view(), name='workflow-attachment-detail'),
+    path('api/intents/resolve/', ResolveView.as_view(), name='intent-resolve'),
+    path('api/intents/', IntentListView.as_view(), name='intent-list'),
+    path('api/intents/<int:pk>/', IntentDetailView.as_view(), name='intent-detail'),
+    path('api/intents/<int:pk>/status/', IntentStatusView.as_view(), name='intent-status'),
+    path('api/intents/<int:pk>/dispatch/', DispatchIntentView.as_view(), name='intent-dispatch'),
+    path('api/intents/entities/<str:code>/reference-slots/', EntityReferenceSlotsView.as_view(), name='entity-reference-slots'),
+    path('api/intents/entities/<str:code>/reference-slots/<str:slot>/', EntityReferenceSlotDetailView.as_view(), name='entity-reference-slot-detail'),
+    path('api/intents/browse/', AssetBrowseView.as_view(), name='intent-browse'),
     # Workflow registration / fetch (nodegraph_workflow entities)
     path('api/workflows/', WorkflowRegisterView.as_view(), name='workflow-register'),
     path('api/workflows/<str:code>/', WorkflowDetailView.as_view(), name='workflow-detail'),

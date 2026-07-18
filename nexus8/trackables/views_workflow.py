@@ -25,6 +25,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .graph_scanner import scan_graph
 from .models import NodegraphWorkflow, update_symlink
 
 _VERSION_REF = re.compile(r"^v(\d+)$")
@@ -95,8 +96,9 @@ class WorkflowRegisterView(APIView):
                 status=status.HTTP_200_OK,
             )
 
+        scanned = scan_graph(graph)
         version = entity.publish(
-            data={"graph": graph},
+            data={"graph": graph, "graph_interface": scanned},
             symlinks=tuple(symlinks),
             content_hash=content_hash,
             created_by=actor,
@@ -107,6 +109,7 @@ class WorkflowRegisterView(APIView):
                 "version_number": version.version_number,
                 "content_hash": content_hash,
                 "symlinks": _symlink_names_for(entity, version),
+                "graph_interface": scanned,
                 "created": True,
             },
             status=status.HTTP_201_CREATED,
@@ -150,6 +153,7 @@ class WorkflowDetailView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
+        vdata = version.data or {}
         return Response(
             {
                 "code": code,
@@ -157,6 +161,7 @@ class WorkflowDetailView(APIView):
                 "version_number": version.version_number,
                 "content_hash": version.content_hash or "",
                 "symlinks": _symlink_names_for(entity, version),
-                "graph": (version.data or {}).get("graph"),
+                "graph": vdata.get("graph"),
+                "graph_interface": vdata.get("graph_interface") or {},
             }
         )
