@@ -843,11 +843,12 @@ def _deliver_intent_outputs(intent, outputs: dict) -> None:
             version_data = _version_data_from_output(value, intent, slot)
             with transaction.atomic():
                 version_number = _next_version_number(target_asset)
-                Version.objects.create(
+                new_ver = Version.objects.create(
                     entity=target_asset,
                     version_number=version_number,
                     data=version_data,
                 )
+                update_symlink(target_asset, "latest", new_ver)
             log.info(
                 "[nexus8-intent] created v%d of %s from intent %s slot %r",
                 version_number, target_asset.code, intent.id, slot,
