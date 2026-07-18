@@ -12,6 +12,7 @@ from django.db import models
 
 from .base import Trackable
 from .entities import VersionedEntity
+from .versions import Version
 
 RELATION_SOURCES = [("user", "User"), ("ai", "AI suggested")]
 
@@ -22,6 +23,15 @@ class EntityRelation(Trackable):
     )
     entity = models.ForeignKey(
         VersionedEntity, on_delete=models.CASCADE, related_name="asset_relations"
+    )
+    # Which version of `asset` this relation was created from (e.g. the version
+    # whose pixels a mask was rasterized from). Null means "entity-level" / unknown.
+    asset_version = models.ForeignKey(
+        Version,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="entity_relations",
     )
     role = models.CharField(max_length=32, db_index=True)
     confidence = models.FloatField(default=1.0)

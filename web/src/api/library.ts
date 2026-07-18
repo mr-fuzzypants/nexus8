@@ -24,6 +24,7 @@ export interface AssetSummary {
   ai_analysis_status: string;
   project_code: string;
   created_at: string;
+  latest_version_number: number | null;
 }
 
 export interface FacetValue {

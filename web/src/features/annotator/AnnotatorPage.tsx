@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react'
-import { useLocation } from 'wouter'
+import { useLocation, useSearch } from 'wouter'
 import { useQuery } from '@tanstack/react-query'
 import * as Y from 'yjs'
 import { assetIs3DModel, assetIsVideo, type AssetSummary } from '../../api/library'
@@ -25,6 +25,7 @@ import {
   snapshotAnnotationDoc,
   type AnnotationDoc,
 } from './annotatorApi'
+import { getVersionHistory } from '../../api/versions'
 import { isMaskShape, rasterizeMask } from './rasterizeMask'
 import './annotator.css'
 
@@ -88,6 +89,9 @@ function toBase64(data: Uint8Array) {
 
 export default function AnnotatorPage({ params }: { params: { code: string; assetId: string } }) {
   const assetId = Number(params.assetId)
+  const search = useSearch()
+  const versionParam = new URLSearchParams(search).get('version')
+  const pinnedVersionNumber = versionParam != null ? Number(versionParam) : null
   const [, navigate] = useLocation()
   const back = () => navigate(`/p/${params.code}`)
 
@@ -97,12 +101,23 @@ export default function AnnotatorPage({ params }: { params: { code: string; asse
     enabled: Number.isFinite(assetId),
   })
   const docQuery = useQuery({
-    queryKey: ['annotator', 'doc', assetId],
-    queryFn: () => getOrCreateAnnotationDoc(assetId),
+    queryKey: ['annotator', 'doc', assetId, pinnedVersionNumber],
+    queryFn: () => getOrCreateAnnotationDoc(assetId, pinnedVersionNumber),
     enabled: Number.isFinite(assetId),
   })
+  // Only fetch version history when opening from a specific version row.
+  const versionHistoryQuery = useQuery({
+    queryKey: ['annotator', 'versions', assetId],
+    queryFn: () => getVersionHistory(assetId),
+    enabled: Number.isFinite(assetId) && pinnedVersionNumber != null,
+  })
 
-  if (assetQuery.isLoading || docQuery.isLoading) {
+  const isLoading =
+    assetQuery.isLoading ||
+    docQuery.isLoading ||
+    (pinnedVersionNumber != null && versionHistoryQuery.isLoading)
+
+  if (isLoading) {
     return (
       <div className="annotator-page">
         <button className="annotator-page__action" onClick={back}>
@@ -124,16 +139,35 @@ export default function AnnotatorPage({ params }: { params: { code: string; asse
     )
   }
 
-  return <AnnotatorWorkspace asset={assetQuery.data} doc={docQuery.data} onBack={back} />
+  // If a specific version was requested, use that version's file_path so the
+  // viewer shows the correct image (not the current/latest one).
+  const pinnedVersion =
+    pinnedVersionNumber != null
+      ? versionHistoryQuery.data?.versions.find((v) => v.version_number === pinnedVersionNumber)
+      : undefined
+  const asset = pinnedVersion
+    ? { ...assetQuery.data, file_path: pinnedVersion.file_path }
+    : assetQuery.data
+
+  return (
+    <AnnotatorWorkspace
+      asset={asset}
+      doc={docQuery.data}
+      versionNumber={pinnedVersion?.version_number ?? asset.latest_version_number ?? undefined}
+      onBack={back}
+    />
+  )
 }
 
 function AnnotatorWorkspace({
   asset,
   doc,
+  versionNumber,
   onBack,
 }: {
   asset: AssetSummary
   doc: AnnotationDoc
+  versionNumber?: number
   onBack: () => void
 }) {
   const [profile] = useState(loadProfile)
@@ -262,6 +296,7 @@ function AnnotatorWorkspace({
       const mask = await saveMask(asset.id, blob, {
         annotationId: doc.id,
         name: `${asset.name}-mask`,
+        versionNumber,
       })
       setMaskState(`Saved mask ${mask.code}`)
       window.setTimeout(() => setMaskState('idle'), 2500)

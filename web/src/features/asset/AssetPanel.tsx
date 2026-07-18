@@ -1,4 +1,5 @@
 import { ActionIcon, Anchor, Badge, Button, Drawer, Group, Stack, Text, Tooltip } from '@mantine/core';
+import { useEffect, useState } from 'react';
 import {
   IconExternalLink,
   IconEye,
@@ -42,14 +43,16 @@ const STATUS_LABELS: Record<string, string> = {
 
 function MasksSection({
   asset,
+  versionNumber,
   onOpenAsset,
 }: {
   asset: AssetSummary;
+  versionNumber?: number | null;
   onOpenAsset?: (asset: AssetSummary) => void;
 }) {
   const { data: masks } = useQuery({
-    queryKey: ['asset', asset.id, 'masks'],
-    queryFn: () => listMasks(asset.id),
+    queryKey: ['asset', asset.id, 'masks', versionNumber ?? null],
+    queryFn: () => listMasks(asset.id, versionNumber),
   });
 
   if (!masks || masks.length === 0) {
@@ -96,6 +99,8 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
   const [, navigate] = useLocation();
   const { code } = useProject();
   const openViewer = useViewerStore((s) => s.open);
+  const [selectedVersionNumber, setSelectedVersionNumber] = useState<number | null>(null);
+  useEffect(() => { setSelectedVersionNumber(null); }, [asset?.id]);
 
   return (
     <Drawer
@@ -199,10 +204,21 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
             </Group>
           )}
 
-          {asset.media_type === 'image' && <MasksSection asset={asset} onOpenAsset={onOpenAsset} />}
+          {asset.media_type === 'image' && (
+            <MasksSection
+              asset={asset}
+              versionNumber={selectedVersionNumber}
+              onOpenAsset={onOpenAsset}
+            />
+          )}
           <RelatedSection asset={asset} />
           <SimilarSection asset={asset} onOpenAsset={(a) => onOpenAsset?.(a)} />
-          <VersionsSection asset={asset} onAssetUpdated={(a) => onOpenAsset?.(a)} />
+          <VersionsSection
+            asset={asset}
+            onAssetUpdated={(a) => { setSelectedVersionNumber(null); onOpenAsset?.(a); }}
+            selectedVersionNumber={selectedVersionNumber}
+            onVersionSelect={setSelectedVersionNumber}
+          />
           <ProvenanceSection asset={asset} />
           <WorkflowsSection target={{ kind: 'asset', asset }} onRunOpen={onClose} />
           <RunHistorySection asset={asset} />

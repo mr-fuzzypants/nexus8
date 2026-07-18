@@ -191,6 +191,7 @@ export interface RunIntent {
   engineRunId: string;
   errorMessage: string;
   createdAt: string;
+  workflowCode: string | null;
 }
 
 // ---- Fan-out ----

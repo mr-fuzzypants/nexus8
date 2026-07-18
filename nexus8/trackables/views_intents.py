@@ -790,6 +790,8 @@ class IntentStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def patch(self, request, pk):
+        import logging
+        log = logging.getLogger(__name__)
         intent = get_object_or_404(RunIntent, pk=pk)
         new_status = request.data.get("status")
         if new_status not in {"queued", "running", "succeeded", "failed", "cancelled"}:
@@ -797,18 +799,26 @@ class IntentStatusView(APIView):
                 {"error": "status must be queued|running|succeeded|failed|cancelled"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        intent.status = new_status
+
         if request.data.get("engineRunId"):
             intent.engine_run_id = request.data["engineRunId"]
         if request.data.get("errorMessage"):
             intent.error_message = request.data["errorMessage"]
-        intent.save()
 
         if new_status == "succeeded":
             outputs = request.data.get("outputs") or {}
-            if outputs:
+            try:
                 _deliver_intent_outputs(intent, outputs)
+                intent.status = "succeeded"
+            except Exception as exc:
+                # Delivery failed — all version creates were rolled back; mark intent failed.
+                log.exception("[nexus8-intent] delivery failed for intent %s: %s", pk, exc)
+                intent.status = "failed"
+                intent.error_message = f"Output delivery failed: {exc}"
+        else:
+            intent.status = new_status
 
+        intent.save()
         return Response(_intent_dict(intent))
 
 
@@ -820,6 +830,10 @@ def _deliver_intent_outputs(intent, outputs: dict) -> None:
     Each key is a slot name matching an output binding; the value is whatever
     the Nexus8Output node produced (a nexus8:// URI for the test pass-through
     graph, or a file path / URL for real generation pipelines).
+
+    All slot creates are wrapped in a single transaction — either every declared
+    output lands or none do (no half-landing).  Any failure raises so the caller
+    can mark the intent failed and roll back.
     """
     import logging
     from django.db import transaction
@@ -829,7 +843,11 @@ def _deliver_intent_outputs(intent, outputs: dict) -> None:
     binding_map = {b["slot"]: b for b in (intent.output_bindings or [])}
     target_asset = intent.target_asset
 
+    slots_to_create = []
     for slot, value in outputs.items():
+        if value is None or value == "":
+            log.warning("[nexus8-intent] intent %s slot %r has empty value — skipping", intent.id, slot)
+            continue
         binding = binding_map.get(slot)
         if not binding:
             log.warning("[nexus8-intent] no binding for output slot %r — skipping", slot)
@@ -838,25 +856,24 @@ def _deliver_intent_outputs(intent, outputs: dict) -> None:
         if target_mode != "new_version_of_self":
             log.info("[nexus8-intent] slot %r target=%r — not yet handled", slot, target_mode)
             continue
+        slots_to_create.append((slot, value))
 
-        try:
+    if not slots_to_create:
+        return
+
+    with transaction.atomic():
+        for slot, value in slots_to_create:
             version_data = _version_data_from_output(value, intent, slot)
-            with transaction.atomic():
-                version_number = _next_version_number(target_asset)
-                new_ver = Version.objects.create(
-                    entity=target_asset,
-                    version_number=version_number,
-                    data=version_data,
-                )
-                update_symlink(target_asset, "latest", new_ver)
+            version_number = _next_version_number(target_asset)
+            new_ver = Version.objects.create(
+                entity=target_asset,
+                version_number=version_number,
+                data=version_data,
+            )
+            update_symlink(target_asset, "latest", new_ver)
             log.info(
                 "[nexus8-intent] created v%d of %s from intent %s slot %r",
                 version_number, target_asset.code, intent.id, slot,
-            )
-        except Exception:
-            log.exception(
-                "[nexus8-intent] failed to create version for intent %s slot %r",
-                intent.id, slot,
             )
 
 
@@ -919,6 +936,7 @@ def _intent_dict(intent):
         "errorMessage": intent.error_message,
         "batchVersionId": intent.batch_version_id,
         "createdAt": intent.created_at.isoformat(),
+        "workflowCode": intent.attachment.workflow.code if intent.attachment_id else None,
     }
 
 

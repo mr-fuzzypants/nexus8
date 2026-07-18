@@ -135,6 +135,9 @@ def asset_summary(asset):
         "ai_analysis_status": asset.ai_analysis_status,
         "project_code": asset.project_code or "",
         "created_at": asset.created_at.isoformat(),
+        "latest_version_number": (
+            asset.versions.order_by("-version_number").values_list("version_number", flat=True).first()
+        ),
     }
 
 

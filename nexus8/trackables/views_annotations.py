@@ -21,7 +21,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import EntityRelation, ImageAnnotation, MediaAsset
+from .models import EntityRelation, ImageAnnotation, MediaAsset, Version
 from .services.ingest import ingest_file
 from .views_library import asset_summary
 
@@ -35,6 +35,7 @@ def annotation_summary(doc):
         "code": doc.code,
         "name": doc.name,
         "target_asset_id": doc.target_asset_id,
+        "target_asset_version_number": doc.type_data.get("target_asset_version_number"),
         "room_id": doc.room_id,
         "doc_state": doc.doc_state,
         "snapshot_version": latest.version_number if latest else None,
@@ -52,13 +53,16 @@ class LibraryAssetDetailView(APIView):
 class AnnotationDocListCreateView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def _find(self, asset_id):
-        return (
-            ImageAnnotation.objects.active()
-            .filter(type_data__target_asset_id=asset_id)
-            .order_by("created_at")
-            .first()
+    def _find(self, asset_id, version_number=None):
+        qs = ImageAnnotation.objects.active().filter(
+            type_data__target_asset_id=asset_id
         )
+        if version_number is not None:
+            qs = qs.filter(type_data__target_asset_version_number=version_number)
+        else:
+            # Entity-level doc: no version pinned.
+            qs = qs.filter(type_data__target_asset_version_number__isnull=True)
+        return qs.order_by("created_at").first()
 
     def get(self, request):
         asset_id = request.query_params.get("asset")
@@ -67,7 +71,8 @@ class AnnotationDocListCreateView(APIView):
                 {"detail": "asset query parameter is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        doc = self._find(int(asset_id))
+        version_number = request.query_params.get("version_number")
+        doc = self._find(int(asset_id), int(version_number) if version_number else None)
         if not doc:
             return Response(status=status.HTTP_404_NOT_FOUND)
         return Response(annotation_summary(doc))
@@ -82,15 +87,20 @@ class AnnotationDocListCreateView(APIView):
         asset_id = int(asset_id)
         asset = get_object_or_404(MediaAsset.objects, pk=asset_id)
 
-        existing = self._find(asset_id)
+        version_number = request.data.get("target_asset_version_number")
+        version_number = int(version_number) if version_number is not None else None
+
+        existing = self._find(asset_id, version_number)
         if existing:
             return Response(annotation_summary(existing))
 
+        version_label = f" v{version_number}" if version_number is not None else ""
         doc = ImageAnnotation.objects.create(
             code=f"annot_{uuid.uuid4().hex[:10]}",
-            name=f"Annotations · {asset.name}",
+            name=f"Annotations · {asset.name}{version_label}",
             type_data={
                 "target_asset_id": asset_id,
+                "target_asset_version_number": version_number,
                 "room_id": "",
                 "doc_state": "",
             },
@@ -151,6 +161,16 @@ class MaskSaveView(APIView):
             created_by=request.user if request.user.is_authenticated else None,
         )
 
+        # Resolve the source version: client sends version_number, we default to latest.
+        version_number = request.data.get("version_number")
+        asset_version = None
+        if version_number is not None:
+            asset_version = Version.objects.filter(
+                entity=source, version_number=int(version_number)
+            ).first()
+        if asset_version is None:
+            asset_version = source.versions.order_by("-version_number").first()
+
         # Record provenance and link the mask back to its source asset.
         annotation_id = request.data.get("annotation_id")
         mask_asset.type_data["mask_of_asset_id"] = source.id
@@ -163,7 +183,7 @@ class MaskSaveView(APIView):
             asset=source,
             entity=mask_asset,
             role=MASK_ROLE,
-            defaults={"source": "user", "confidence": 1.0},
+            defaults={"source": "user", "confidence": 1.0, "asset_version": asset_version},
         )
 
         return Response(asset_summary(mask_asset), status=status.HTTP_201_CREATED)
@@ -173,9 +193,8 @@ class AssetMasksView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, pk):
-        relations = (
-            EntityRelation.objects.filter(asset_id=pk, role=MASK_ROLE)
-            .select_related("entity")
-            .order_by("-created_at")
-        )
-        return Response([asset_summary(relation.entity) for relation in relations])
+        qs = EntityRelation.objects.filter(asset_id=pk, role=MASK_ROLE).select_related("entity")
+        version_number = request.query_params.get("version_number")
+        if version_number is not None:
+            qs = qs.filter(asset_version__version_number=int(version_number))
+        return Response([asset_summary(r.entity) for r in qs.order_by("-created_at")])

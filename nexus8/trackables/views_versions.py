@@ -22,6 +22,7 @@ RECOMMENDATION_LIMIT_MAX = 30
 
 def version_node(version, symlink_names):
     data = version.data or {}
+    provenance = data.get("provenance") or {}
     return {
         "id": version.id,
         "version_number": version.version_number,
@@ -31,6 +32,7 @@ def version_node(version, symlink_names):
         "file_path": data.get("file_path", ""),
         "thumbnails": data.get("thumbnails") or {},
         "symlinks": symlink_names.get(version.id, []),
+        "intentId": provenance.get("intent_id"),
     }
 
 

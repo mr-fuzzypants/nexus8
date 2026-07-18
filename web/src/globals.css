@@ -679,6 +679,15 @@ body {
 .version-row-view {
   position: absolute;
   top: 50%;
+  right: 34px;
+  transform: translateY(-50%);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.version-row-annotate {
+  position: absolute;
+  top: 50%;
   right: 6px;
   transform: translateY(-50%);
   opacity: 0;
@@ -686,7 +695,9 @@ body {
 }
 
 .version-row-wrap:hover .version-row-view,
-.version-row-view:focus-visible {
+.version-row-wrap:hover .version-row-annotate,
+.version-row-view:focus-visible,
+.version-row-annotate:focus-visible {
   opacity: 1;
 }
 

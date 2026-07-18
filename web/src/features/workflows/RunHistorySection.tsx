@@ -4,6 +4,7 @@ import { IconRefresh } from '@tabler/icons-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { cloneIntent, dispatchIntent, listIntents } from '../../api/intents';
 import type { AssetSummary } from '../../api/library';
+import { getVersionHistory } from '../../api/versions';
 
 const STATUS_COLOR: Record<string, string> = {
   succeeded: 'teal',
@@ -63,6 +64,19 @@ export function RunHistorySection({ asset }: { asset: AssetSummary }) {
     refetchInterval: 10_000,
   });
 
+  const { data: versionHistory } = useQuery({
+    queryKey: ['versions', asset.id],
+    queryFn: () => getVersionHistory(asset.id),
+    staleTime: 30_000,
+  });
+
+  // Map intent id (string) → version_number for versions produced by that intent
+  const versionByIntent = Object.fromEntries(
+    (versionHistory?.versions ?? [])
+      .filter((v) => v.intentId != null)
+      .map((v) => [v.intentId!, v.version_number]),
+  );
+
   if (isLoading) return null;
   if (!intents || intents.length === 0) return null;
 
@@ -105,6 +119,11 @@ export function RunHistorySection({ asset }: { asset: AssetSummary }) {
             <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
               {intent.createdAt ? timeAgo(intent.createdAt) : ''}
             </Text>
+            {intent.status === 'succeeded' && versionByIntent[intent.id] != null && (
+              <Badge size="xs" variant="outline" tt="none" style={{ flexShrink: 0 }}>
+                → v{versionByIntent[intent.id]}
+              </Badge>
+            )}
             {(intent.status === 'succeeded' || intent.status === 'failed') && (
               <ReproduceButton intentId={intent.id} assetCode={asset.code} />
             )}

@@ -11,6 +11,7 @@ export interface VersionNode {
   file_path: string;
   thumbnails: Record<string, string>;
   symlinks: string[];
+  intentId: string | null;
 }
 
 export interface LineageEdge {

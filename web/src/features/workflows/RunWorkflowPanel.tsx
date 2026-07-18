@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent, ReactNode } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import {
@@ -36,6 +36,7 @@ import type {
   ResolvedCandidate,
   RunIntent,
 } from './types';
+import { useRunTrace } from './useRunTrace';
 
 interface ListEdit {
   added: DraggedAsset[];
@@ -329,6 +330,7 @@ export function RunWorkflowPanel() {
   const [denoise, setDenoise] = useState(0.5);
   const [seed, setSeed] = useState(0);
   const [intentId, setIntentId] = useState<string | null>(null);
+  const [engineRunId, setEngineRunId] = useState<string | null>(null);
 
   const polledIntent = useQuery({
     queryKey: ['intent', intentId],
@@ -340,6 +342,15 @@ export function RunWorkflowPanel() {
     },
   });
   const intent = polledIntent.data ?? null;
+
+  const trace = useRunTrace(engineRunId);
+  const traceFinishedRef = useRef(false);
+  useEffect(() => {
+    if (trace.finished && !traceFinishedRef.current) {
+      traceFinishedRef.current = true;
+      polledIntent.refetch();
+    }
+  }, [trace.finished, polledIntent]);
 
   const proposal = useQuery({
     queryKey: ['wf-resolve', attachment?.id, asset?.id, selections],
@@ -355,6 +366,7 @@ export function RunWorkflowPanel() {
     setListEdits({});
     setArmedPins({});
     setIntentId(null);
+    setEngineRunId(null);
     const view =
       attachment?.graph.views.find((v) => v.name === attachment.viewName) ??
       attachment?.graph.views[0];
@@ -376,11 +388,13 @@ export function RunWorkflowPanel() {
         seed,
         armedPins: armed,
       });
-      await dispatchIntent(intent.id);
-      return intent;
+      const dispatched = await dispatchIntent(intent.id);
+      return { intent, engineRunId: dispatched.engineRunId };
     },
-    onSuccess: (created) => {
+    onSuccess: ({ intent: created, engineRunId: eid }) => {
+      traceFinishedRef.current = false;
       setIntentId(created.id);
+      setEngineRunId(eid || null);
     },
   });
 
@@ -721,6 +735,18 @@ export function RunWorkflowPanel() {
               seed {intent.seed}
             </Text>
           </Group>
+
+          {!finished && trace.phase && (
+            <Group gap={6}>
+              <Loader size={10} />
+              <Text size="xs" c="dimmed">
+                {trace.phase === 'queued' ? 'Queued on engine' : `Running on engine`}
+                {trace.nodesTotal > 0
+                  ? ` — ${trace.nodesDone}/${trace.nodesTotal} nodes`
+                  : ''}
+              </Text>
+            </Group>
+          )}
 
           {intent.status === 'failed' && intent.errorMessage && (
             <Text size="xs" c="red">

@@ -166,6 +166,7 @@ function _normaliseIntent(raw: Record<string, unknown>): RunIntent {
     engineRunId: String(raw.engineRunId ?? ''),
     errorMessage: String(raw.errorMessage ?? ''),
     createdAt: String(raw.createdAt ?? ''),
+    workflowCode: (raw.workflowCode as string | null) ?? null,
   };
 }
 

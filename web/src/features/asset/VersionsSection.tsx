@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
+import { useLocation } from 'wouter';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ActionIcon, Badge, Button, Group, Loader, Text, Tooltip } from '@mantine/core';
-import { IconArrowsDiff, IconEye, IconUpload } from '@tabler/icons-react';
+import { ActionIcon, Badge, Button, Group, Loader, Text, Tooltip, Popover, Stack } from '@mantine/core';
+import { IconArrowsDiff, IconEye, IconPencil, IconUpload } from '@tabler/icons-react';
 import clsx from 'clsx';
 import {
   getVersionHistory,
@@ -12,15 +13,80 @@ import {
 import type { AssetSummary } from '../../api/library';
 import { useViewerStore } from '../viewer/viewerStore';
 import { CompareSlider } from './CompareSlider';
+import { getIntent } from '../../api/intents';
+
+function IntentBadge({ intentId }: { intentId: string }) {
+  const [opened, setOpened] = useState(false);
+  const intent = useQuery({
+    queryKey: ['intent', intentId],
+    queryFn: () => getIntent(intentId),
+    enabled: opened,
+    staleTime: Infinity,
+  });
+  const d = intent.data;
+  return (
+    <Popover opened={opened} onClose={() => setOpened(false)} withArrow shadow="md" width={220}>
+      <Popover.Target>
+        <Badge
+          size="xs"
+          variant="dot"
+          color="grape"
+          tt="none"
+          style={{ cursor: 'pointer' }}
+          onClick={(e) => { e.stopPropagation(); setOpened((o) => !o); }}
+        >
+          run #{intentId}
+        </Badge>
+      </Popover.Target>
+      <Popover.Dropdown>
+        {intent.isLoading ? (
+          <Loader size={12} />
+        ) : d ? (
+          <Stack gap={4}>
+            {d.workflowCode && (
+              <Group gap={6} justify="space-between">
+                <Text size="xs" c="dimmed">workflow</Text>
+                <Text size="xs" ff="monospace">{d.workflowCode}</Text>
+              </Group>
+            )}
+            <Group gap={6} justify="space-between">
+              <Text size="xs" c="dimmed">seed</Text>
+              <Text size="xs" ff="monospace">{d.seed}</Text>
+            </Group>
+            <Group gap={6} justify="space-between">
+              <Text size="xs" c="dimmed">status</Text>
+              <Text size="xs" c={d.status === 'succeeded' ? 'teal' : 'red'}>{d.status}</Text>
+            </Group>
+            {d.engineRunId && (
+              <Text size="xs" c="dimmed" ff="monospace" truncate>
+                {d.engineRunId.slice(0, 16)}…
+              </Text>
+            )}
+          </Stack>
+        ) : (
+          <Text size="xs" c="dimmed">Intent not found</Text>
+        )}
+      </Popover.Dropdown>
+    </Popover>
+  );
+}
 
 interface VersionsSectionProps {
   asset: AssetSummary;
   onAssetUpdated?: (asset: AssetSummary) => void;
+  selectedVersionNumber?: number | null;
+  onVersionSelect?: (versionNumber: number | null) => void;
 }
 
-export function VersionsSection({ asset, onAssetUpdated }: VersionsSectionProps) {
+export function VersionsSection({
+  asset,
+  onAssetUpdated,
+  selectedVersionNumber,
+  onVersionSelect,
+}: VersionsSectionProps) {
   const queryClient = useQueryClient();
   const openViewer = useViewerStore((s) => s.open);
+  const [, navigate] = useLocation();
   const fileRef = useRef<HTMLInputElement>(null);
   const [comparing, setComparing] = useState(false);
   const [pickedIds, setPickedIds] = useState<number[]>([]);
@@ -49,6 +115,15 @@ export function VersionsSection({ asset, onAssetUpdated }: VersionsSectionProps)
       if (ids.includes(version.id)) return ids.filter((id) => id !== version.id);
       return [...ids.slice(-1), version.id];
     });
+  };
+
+  const handleRowClick = (version: VersionNode) => {
+    if (comparing) {
+      togglePick(version);
+    } else if (onVersionSelect) {
+      const next = selectedVersionNumber === version.version_number ? null : version.version_number;
+      onVersionSelect(next);
+    }
   };
 
   return (
@@ -113,48 +188,71 @@ export function VersionsSection({ asset, onAssetUpdated }: VersionsSectionProps)
       )}
 
       <div className="version-list">
-        {versions.map((version) => (
-          <div key={version.id} className="version-row-wrap">
-            <button
-              type="button"
-              className={clsx(
-                'version-row',
-                comparing && pickedIds.includes(version.id) && 'picked',
-              )}
-              onClick={() => comparing && togglePick(version)}
-              style={{ cursor: comparing ? 'pointer' : 'default', width: '100%' }}
-            >
-              <img src={version.thumbnails['256'] || version.file_path} alt="" loading="lazy" />
-              <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
-                <Group gap={6}>
-                  <Badge size="xs" variant="outline">
-                    v{version.version_number}
-                  </Badge>
-                  {version.symlinks.map((name) => (
-                    <Badge key={name} size="xs" variant="light">
-                      {name}
-                    </Badge>
-                  ))}
-                </Group>
-                <Text size="xs" c="dimmed" mt={2}>
-                  {new Date(version.created_at).toLocaleString()}
-                  {version.created_by ? ` · ${version.created_by}` : ''}
-                </Text>
-              </div>
-            </button>
-            <Tooltip label={`View v${version.version_number}`}>
-              <ActionIcon
-                className="version-row-view"
-                variant="subtle"
-                size="sm"
-                onClick={() => openViewer({ asset, version })}
-                aria-label={`View version ${version.version_number}`}
+        {versions.map((version) => {
+          const isSelected = selectedVersionNumber === version.version_number;
+          return (
+            <div key={version.id} className="version-row-wrap">
+              <button
+                type="button"
+                className={clsx(
+                  'version-row',
+                  comparing && pickedIds.includes(version.id) && 'picked',
+                  !comparing && isSelected && 'picked',
+                )}
+                onClick={() => handleRowClick(version)}
+                style={{
+                  cursor: comparing || onVersionSelect ? 'pointer' : 'default',
+                  width: '100%',
+                }}
               >
-                <IconEye size={14} stroke={1.75} />
-              </ActionIcon>
-            </Tooltip>
-          </div>
-        ))}
+                <img src={version.thumbnails['256'] || version.file_path} alt="" loading="lazy" />
+                <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                  <Group gap={6}>
+                    <Badge size="xs" variant="outline">
+                      v{version.version_number}
+                    </Badge>
+                    {version.symlinks.map((name) => (
+                      <Badge key={name} size="xs" variant="light">
+                        {name}
+                      </Badge>
+                    ))}
+                    {version.intentId && <IntentBadge intentId={version.intentId} />}
+                  </Group>
+                  <Text size="xs" c="dimmed" mt={2}>
+                    {new Date(version.created_at).toLocaleString()}
+                    {version.created_by ? ` · ${version.created_by}` : ''}
+                  </Text>
+                </div>
+              </button>
+              <Tooltip label={`View v${version.version_number}`}>
+                <ActionIcon
+                  className="version-row-view"
+                  variant="subtle"
+                  size="sm"
+                  onClick={() => openViewer({ asset, version })}
+                  aria-label={`View version ${version.version_number}`}
+                >
+                  <IconEye size={14} stroke={1.75} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label={`Annotate v${version.version_number}`}>
+                <ActionIcon
+                  className="version-row-annotate"
+                  variant="subtle"
+                  size="sm"
+                  onClick={() =>
+                    navigate(
+                      `~/p/${asset.project_code}/annotate/${asset.id}?version=${version.version_number}`,
+                    )
+                  }
+                  aria-label={`Annotate version ${version.version_number}`}
+                >
+                  <IconPencil size={14} stroke={1.75} />
+                </ActionIcon>
+              </Tooltip>
+            </div>
+          );
+        })}
       </div>
 
       {(history.data?.derived_from.length ?? 0) > 0 && (
