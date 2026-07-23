@@ -65,7 +65,7 @@ from .views_projects import (
     ProjectDetailView,
     ProjectListView,
 )
-from .views_blob import BlobResolveView
+from .views_blob import BlobResolveView, BlobStatView
 from .views_workflow import WorkflowDetailView, WorkflowRegisterView
 from .views_runs import (
     AssetProvenanceView,
@@ -134,6 +134,7 @@ urlpatterns = [
     path('api/library/smart-collections/<int:pk>/', SmartCollectionDetailView.as_view(), name='library-smart-collection'),
     # Blob resolution for external engines (nodegraph nexus8:// driver)
     path('api/blob/resolve/', BlobResolveView.as_view(), name='blob-resolve'),
+    path('api/blob/stat/', BlobStatView.as_view(), name='blob-stat'),
     # Intent-first orchestration: attachments, resolve, intents, reference slots, browse
     path('api/intents/attachments/', WorkflowAttachmentListView.as_view(), name='workflow-attachments'),
     path('api/intents/attachments/<int:pk>/', WorkflowAttachmentDetailView.as_view(), name='workflow-attachment-detail'),

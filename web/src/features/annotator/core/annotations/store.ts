@@ -59,7 +59,9 @@ export class AnnotationDocumentStore {
     const annotations = Array.from(this.annotations.values())
       .map((annotation) => normalizeAnnotationEntity(cloneValue(annotation)))
       .sort((left, right) => getAnnotationOrder(left) - getAnnotationOrder(right))
-    const layers = Array.from(this.layers.values()).map((layer) => cloneValue(layer))
+    const layers = Array.from(this.layers.values())
+      .map((layer) => cloneValue(layer))
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
 
     return normalizeAnnotationSnapshot({
       annotations,
@@ -128,6 +130,24 @@ export class AnnotationDocumentStore {
 
   removeAnnotation(id: string) {
     this.annotations.delete(id)
+  }
+
+  upsertLayer(layer: AnnotationLayer) {
+    this.layers.set(layer.id, layer)
+  }
+
+  removeLayer(id: string) {
+    if (id === DEFAULT_LAYER.id) {
+      return
+    }
+    this.doc.transact(() => {
+      Array.from(this.annotations.entries()).forEach(([annotationId, annotation]) => {
+        if (annotation.layerId === id) {
+          this.annotations.delete(annotationId)
+        }
+      })
+      this.layers.delete(id)
+    })
   }
 
   clearAnnotations() {

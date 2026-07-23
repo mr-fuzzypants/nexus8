@@ -11,6 +11,7 @@ import {
   MoveLeft,
   MoveRight,
   MoveUp,
+  PenTool,
   PencilLine,
   Redo2,
   RotateCcw,
@@ -22,6 +23,7 @@ import {
   Trash2,
   Type,
   Undo2,
+  Wand2,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
@@ -81,6 +83,8 @@ export const VIEWER_TOOL_ICONS = {
   frameScene: ScanSearch,
   parameters: SlidersHorizontal,
   clear3d: Eraser,
+  annotateMode: PenTool,
+  maskMode: Wand2,
 } as const
 
 export type ViewerToolbarToolId = keyof Pick<

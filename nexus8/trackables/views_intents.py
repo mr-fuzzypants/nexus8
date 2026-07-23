@@ -533,6 +533,24 @@ class WorkflowAttachmentListView(APIView):
             except Exception:
                 pass
 
+        # Resolve graph interface: use supplied value or fall back to the
+        # latest published version of this workflow.
+        graph_interface = body.get("graphInterface") or {}
+        if not graph_interface:
+            latest_ver = workflow.resolve_symlink("latest")
+            if latest_ver:
+                graph_interface = (latest_ver.data or {}).get("graph_interface") or {}
+
+        # Auto-derive output bindings from output nodes when not explicitly
+        # provided. iterate → new_version_of_self, derive → new_asset, else discard.
+        mode = body.get("mode", "iterate")
+        if "outputBindings" in body:
+            output_bindings = body["outputBindings"] or []
+        else:
+            output_nodes = [n for n in (graph_interface.get("nodes") or []) if n.get("kind") == "output"]
+            default_target = {"iterate": "new_version_of_self", "derive": "new_asset"}.get(mode, "discard")
+            output_bindings = [{"slot": n["slot"], "target": default_target} for n in output_nodes]
+
         actor = request.user if request.user.is_authenticated else None
         att = WorkflowAttachment.objects.create(
             workflow=workflow,
@@ -540,10 +558,10 @@ class WorkflowAttachmentListView(APIView):
             target_entity=target_entity,
             target_process=body.get("targetProcess", ""),
             level=body.get("level", "process"),
-            mode=body.get("mode", "iterate"),
+            mode=mode,
             view_name=body.get("viewName", ""),
-            graph_interface=body.get("graphInterface") or {},
-            output_bindings=body.get("outputBindings") or [],
+            graph_interface=graph_interface,
+            output_bindings=output_bindings,
             created_by=actor,
         )
         return Response({"id": att.id}, status=status.HTTP_201_CREATED)
@@ -863,7 +881,7 @@ def _deliver_intent_outputs(intent, outputs: dict) -> None:
 
     with transaction.atomic():
         for slot, value in slots_to_create:
-            version_data = _version_data_from_output(value, intent, slot)
+            version_data, stored = _version_data_from_output(value, intent, slot)
             version_number = _next_version_number(target_asset)
             new_ver = Version.objects.create(
                 entity=target_asset,
@@ -871,10 +889,53 @@ def _deliver_intent_outputs(intent, outputs: dict) -> None:
                 data=version_data,
             )
             update_symlink(target_asset, "latest", new_ver)
+            if stored:
+                # Update the asset's live type_data so the grid thumbnail
+                # reflects the newly generated image immediately.
+                target_asset.type_data = target_asset.type_data or {}
+                target_asset.type_data.update({
+                    "file_path": stored["file_path"],
+                    "media_type": stored.get("media_type", "image"),
+                    "thumbnails": stored["thumbnails"],
+                    "placeholder": stored.get("placeholder", ""),
+                    "technical_metadata": stored.get("technical_metadata", {}),
+                })
+                target_asset.save(update_fields=["type_data", "updated_at"])
             log.info(
                 "[nexus8-intent] created v%d of %s from intent %s slot %r",
                 version_number, target_asset.code, intent.id, slot,
             )
+
+
+def _fetch_bytes_from_uri(uri: str) -> tuple[bytes, str]:
+    """
+    Fetch raw bytes from an HTTP/HTTPS URL or a local absolute path.
+
+    Returns (bytes, suggested_filename).  Raises on failure.
+    """
+    import os
+    import posixpath
+    import urllib.parse
+    import urllib.request
+
+    if uri.startswith("http://") or uri.startswith("https://"):
+        with urllib.request.urlopen(uri, timeout=30) as resp:
+            raw = resp.read()
+        # Derive a filename from the URL path, falling back to "image.png".
+        path = urllib.parse.urlparse(uri).path
+        filename = posixpath.basename(path) or "image.png"
+        # Strip any query params that crept into the path segment.
+        filename = filename.split("?")[0] or "image.png"
+        if "." not in filename:
+            filename = "image.png"
+        return raw, filename
+
+    if os.path.isfile(uri):
+        with open(uri, "rb") as fh:
+            raw = fh.read()
+        return raw, os.path.basename(uri) or "output.png"
+
+    raise ValueError(f"Cannot fetch bytes from URI: {uri!r}")
 
 
 def _version_data_from_output(value, intent, slot: str) -> dict:
@@ -882,11 +943,21 @@ def _version_data_from_output(value, intent, slot: str) -> dict:
     Build the Version.data dict from an output slot value.
 
     nexus8:// URI  → copy the referenced version's data (same file), add provenance.
-    Anything else  → record as-is in provenance for now (real generation pipelines
-                     will pass a file path or storage URI here).
-    """
-    from .models import Version, VersionedEntity
+    http(s):// URL → download, ingest into media store, build full version data.
+    local path     → read from disk, ingest into media store.
+    Anything else  → record as-is in provenance only.
 
+    Returns a (version_data, stored_meta) tuple where stored_meta is the dict
+    from store_media_bytes (file_path, thumbnails, placeholder, media_type,
+    technical_metadata) or None if no file was ingested.
+    """
+    import logging
+    import os
+
+    from .models import Version, VersionedEntity
+    from .services.ingest import store_media_bytes
+
+    log = logging.getLogger(__name__)
     provenance = {
         "intent_id": str(intent.id),
         "output_slot": slot,
@@ -894,7 +965,7 @@ def _version_data_from_output(value, intent, slot: str) -> dict:
     }
 
     if isinstance(value, str) and value.startswith("nexus8://"):
-        # Format: nexus8://<entity_code>/v<version_number>
+        # Passthrough: copy source version data (same file, new provenance).
         rest = value[len("nexus8://"):]
         parts = rest.split("/", 1)
         entity_code = parts[0]
@@ -912,11 +983,34 @@ def _version_data_from_output(value, intent, slot: str) -> dict:
             if src_version:
                 data = dict(src_version.data or {})
                 data["provenance"] = provenance
-                return data
+                return data, None
         except Exception:
             pass
+        return {"provenance": provenance}, None
 
-    return {"provenance": provenance}
+    # HTTP/HTTPS URL or local file path → fetch bytes, ingest into media store.
+    if isinstance(value, str) and (
+        value.startswith("http://")
+        or value.startswith("https://")
+        or (value.startswith("/") and os.path.isfile(value))
+    ):
+        try:
+            raw, filename = _fetch_bytes_from_uri(value)
+            stored = store_media_bytes(raw, filename)
+            version_data = {
+                "file_path": stored["file_path"],
+                "thumbnails": stored["thumbnails"],
+                "technical_metadata": stored["technical_metadata"],
+                "provenance": provenance,
+            }
+            return version_data, stored
+        except Exception:
+            log.exception(
+                "[nexus8-intent] failed to ingest output %r for intent %s slot %r",
+                value, intent.id, slot,
+            )
+
+    return {"provenance": provenance}, None
 
 
 def _intent_dict(intent):

@@ -330,6 +330,11 @@ function stableLayerRecord(layer: AnnotationLayer) {
     name: layer.name,
     visible: layer.visible,
     supportedSpaces: [...layer.supportedSpaces],
+    ...(layer.color !== undefined ? { color: layer.color } : {}),
+    ...(layer.order !== undefined ? { order: layer.order } : {}),
+    ...(layer.mask_op !== undefined ? { mask_op: layer.mask_op } : {}),
+    ...(layer.prompt !== undefined ? { prompt: layer.prompt } : {}),
+    ...(layer.reference !== undefined ? { reference: layer.reference } : {}),
   }
 }
 

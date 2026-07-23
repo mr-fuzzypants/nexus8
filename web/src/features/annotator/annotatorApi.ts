@@ -45,11 +45,23 @@ export async function snapshotAnnotationDoc(
   return data
 }
 
-/** Upload a rasterized mask PNG as a new asset linked to the source (role="mask"). */
+export interface SaveMaskOptions {
+  annotationId?: number
+  name?: string
+  versionNumber?: number | null
+  layerId?: string
+  maskOp?: string
+  prompt?: string
+  reference?: string
+  maskDims?: { x: number; y: number; w: number; h: number }
+}
+
+/** Upload a rasterized mask PNG. If layerId is provided the backend adds a new
+ *  version to the existing mask asset for that layer rather than creating a new one. */
 export async function saveMask(
   assetId: number,
   maskBlob: Blob,
-  options: { annotationId?: number; name?: string; versionNumber?: number | null } = {},
+  options: SaveMaskOptions = {},
 ): Promise<AssetSummary> {
   const form = new FormData()
   form.append('mask', maskBlob, options.name ? `${options.name}.png` : 'mask.png')
@@ -58,6 +70,21 @@ export async function saveMask(
   }
   if (options.versionNumber != null) {
     form.append('version_number', String(options.versionNumber))
+  }
+  if (options.layerId != null) {
+    form.append('layer_id', options.layerId)
+  }
+  if (options.maskOp != null) {
+    form.append('mask_op', options.maskOp)
+  }
+  if (options.prompt != null) {
+    form.append('prompt', options.prompt)
+  }
+  if (options.reference != null) {
+    form.append('reference', options.reference)
+  }
+  if (options.maskDims != null) {
+    form.append('mask_dims', JSON.stringify(options.maskDims))
   }
   const { data } = await http.post<AssetSummary>(
     `/trackables/api/library/assets/${assetId}/mask/`,

@@ -22,7 +22,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import EntityRelation, ImageAnnotation, MediaAsset, Version
-from .services.ingest import ingest_file
+from .services.ingest import add_version, ingest_file
 from .views_library import asset_summary
 
 MASK_ROLE = "mask"
@@ -155,11 +155,22 @@ class MaskSaveView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        mask_asset, _created = ingest_file(
-            uploaded,
-            name=uploaded.name or f"{source.name} mask",
-            created_by=request.user if request.user.is_authenticated else None,
-        )
+        annotation_id = request.data.get("annotation_id")
+        layer_id = request.data.get("layer_id")
+        mask_op = request.data.get("mask_op") or None
+        prompt = request.data.get("prompt") or None
+        reference = request.data.get("reference") or None
+        mask_dims_raw = request.data.get("mask_dims")
+        mask_dims = None
+        if mask_dims_raw:
+            try:
+                import json
+                mask_dims = json.loads(mask_dims_raw)
+            except (ValueError, TypeError):
+                pass
+        display_name = (
+            uploaded.name.rsplit(".", 1)[0] if uploaded.name else None
+        ) or f"{source.name} mask"
 
         # Resolve the source version: client sends version_number, we default to latest.
         version_number = request.data.get("version_number")
@@ -171,19 +182,73 @@ class MaskSaveView(APIView):
         if asset_version is None:
             asset_version = source.versions.order_by("-version_number").first()
 
-        # Record provenance and link the mask back to its source asset.
-        annotation_id = request.data.get("annotation_id")
+        # If a layer_id is provided, look for the existing mask asset for this layer
+        # so we can add a new version rather than creating a whole new asset.
+        existing_mask = None
+        if layer_id:
+            existing_mask = MediaAsset.objects.filter(
+                type_data__mask_of_asset_id=source.id,
+                type_data__mask_layer_id=layer_id,
+            ).first()
+
+        if existing_mask is not None:
+            mask_version, _ = add_version(
+                existing_mask,
+                uploaded,
+                created_by=request.user if request.user.is_authenticated else None,
+            )
+            # Keep the asset name in sync with the layer name.
+            if existing_mask.name != display_name:
+                existing_mask.name = display_name
+                existing_mask.save(update_fields=["name", "updated_at"])
+            mask_asset = existing_mask
+        else:
+            mask_asset, _created = ingest_file(
+                uploaded,
+                name=display_name,
+                created_by=request.user if request.user.is_authenticated else None,
+            )
+            mask_version = mask_asset.versions.order_by("-version_number").first()
+
+        # Record / refresh provenance on the mask asset.
         mask_asset.type_data["mask_of_asset_id"] = source.id
+        mask_asset.type_data["asset_functional_type"] = "mask"
         if annotation_id:
             mask_asset.type_data["mask_annotation_id"] = int(annotation_id)
-        mask_asset.type_data["asset_functional_type"] = "mask"
+        if layer_id:
+            mask_asset.type_data["mask_layer_id"] = layer_id
         mask_asset.save(update_fields=["type_data", "updated_at"])
 
-        EntityRelation.objects.get_or_create(
+        # Build relation metadata from submitted fields, preserving any existing
+        # values for fields not included in this request.
+        relation_type_data: dict = {}
+        if mask_op is not None:
+            relation_type_data["mask_op"] = mask_op
+        if prompt is not None:
+            relation_type_data["prompt"] = prompt
+        if reference is not None:
+            relation_type_data["reference"] = reference
+        if mask_dims is not None:
+            relation_type_data["mask_dims"] = mask_dims
+
+        existing_relation = EntityRelation.objects.filter(
+            asset=source, entity=mask_asset, role=MASK_ROLE
+        ).first()
+        merged_type_data = {**(existing_relation.type_data if existing_relation else {}), **relation_type_data}
+
+        # Link (or update link) to the source asset, always pointing to the latest version.
+        EntityRelation.objects.update_or_create(
             asset=source,
             entity=mask_asset,
             role=MASK_ROLE,
-            defaults={"source": "user", "confidence": 1.0, "asset_version": asset_version},
+            defaults={
+                "source": "user",
+                "confidence": 1.0,
+                "asset_version": asset_version,
+                "entity_version": mask_version,
+                "entity_version_number": mask_version.version_number if mask_version else None,
+                "type_data": merged_type_data,
+            },
         )
 
         return Response(asset_summary(mask_asset), status=status.HTTP_201_CREATED)

@@ -128,11 +128,23 @@ export interface AnnotationEntity {
   version: number
 }
 
+export type MaskOp = 'inpaint' | 'outpaint' | 'background_replace' | 'remove' | 'segment'
+
 export interface AnnotationLayer {
   id: string
   name: string
   visible: boolean
   supportedSpaces: ViewerSpace[]
+  /** Visual accent color for display in the mask layers panel. */
+  color?: string
+  /** Sort order within the mask layers panel (lower = higher in list). */
+  order?: number
+  /** AI operation this mask region is intended for. */
+  mask_op?: MaskOp
+  /** Natural language prompt for generative AI operations. */
+  prompt?: string
+  /** Reference asset URI (nexus8://asset/{code}). */
+  reference?: string
 }
 
 export interface AnnotationDocumentSnapshot {

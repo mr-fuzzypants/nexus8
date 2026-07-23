@@ -9,6 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
+import { Layers } from 'lucide-react'
 import {
   normalizeBounds,
   vec2Distance,
@@ -21,6 +22,7 @@ import type {
   AnnotationEntity,
   AnnotationFrame,
   AnnotationGeometry,
+  AnnotationLayer,
   AnnotationTool,
   ParticipantState,
   StructuredObjectTool,
@@ -90,6 +92,10 @@ interface ViewportProps {
   canUndo: boolean
   canRedo: boolean
   onDeleteSelected: () => void
+  annotatorMode: 'annotate' | 'mask'
+  onAnnotatorModeChange: (mode: 'annotate' | 'mask') => void
+  activeMaskLayerId?: string
+  maskLayers?: AnnotationLayer[]
 }
 
 function hasBoundsGeometry(geometry: AnnotationGeometry): geometry is Extract<AnnotationGeometry, { start: Vec2; end: Vec2 }> {
@@ -154,6 +160,10 @@ export function AnnotationViewport({
   canUndo,
   canRedo,
   onDeleteSelected,
+  annotatorMode,
+  onAnnotatorModeChange,
+  activeMaskLayerId,
+  maskLayers,
 }: ViewportProps) {
   const surfaceRef = useRef<HTMLDivElement>(null)
   const surfaceHostRef = useRef<HTMLDivElement>(null)
@@ -166,11 +176,24 @@ export function AnnotationViewport({
   const draftRef = useRef<AnnotationEntity | null>(null)
   // Committed vertices of an in-progress polygon (click-to-add); null when idle.
   const polygonPointsRef = useRef<Vec2[] | null>(null)
-  const BRUSH_DEFAULT_RADIUS = 18
+  // Brush radius expressed in screen pixels. Divided by the current
+  // screen-pixels-per-frame-unit scale at stroke start so the brush appears
+  // the same size on screen regardless of zoom (finer image-pixel coverage
+  // at high zoom, coarser at low zoom — matches Photoshop's behavior).
+  const BRUSH_SCREEN_RADIUS_PX = 18
+
+  function getFrameScale(frame: AnnotationFrame): number {
+    const origin = projectionHost.project(frame, { x: 0, y: 0 }, viewport)
+    const unit = projectionHost.project(frame, { x: 1, y: 0 }, viewport)
+    if (!origin || !unit) return 1
+    const scale = Math.hypot(unit.x - origin.x, unit.y - origin.y)
+    return scale > 1e-6 ? scale : 1
+  }
   const [draft, setDraft] = useState<AnnotationEntity | null>(null)
   const [dragPreview, setDragPreview] = useState<AnnotationEntity | null>(null)
   const [inlineEditorId, setInlineEditorId] = useState<string | null>(null)
   const [parametersPanelAnnotationId, setParametersPanelAnnotationId] = useState<string | null>(null)
+  const [showAnnotationsInMaskMode, setShowAnnotationsInMaskMode] = useState(false)
   const [adapterVersion, setAdapterVersion] = useState(0)
   const [isSurfaceFocused, setIsSurfaceFocused] = useState(false)
   const [isCardMoveGripHovered, setIsCardMoveGripHovered] = useState(false)
@@ -197,23 +220,47 @@ export function AnnotationViewport({
       // as the playhead moves.
       void adapterVersion
       const matched = annotations.filter((annotation) => annotationMatchesViewer(annotation, adapter))
-      if (!videoAdapter) {
-        return matched
+      let filtered = matched
+      if (videoAdapter) {
+        const media = videoAdapter.getMediaState()
+        filtered = filtered.filter((annotation) =>
+          isAnnotationVisibleAtPlaybackTime(annotation, {
+            currentTime: media.currentTime,
+            playlistCurrentTime: media.playlistCurrentTime,
+            playlistDuration: media.playlistDuration,
+            frameRate: media.frameRate,
+            currentFrame: media.currentFrame,
+            activeClipId: media.activeClipId,
+            sourceLabel: media.sourceLabel,
+          }),
+        )
       }
-      const media = videoAdapter.getMediaState()
-      return matched.filter((annotation) =>
-        isAnnotationVisibleAtPlaybackTime(annotation, {
-          currentTime: media.currentTime,
-          playlistCurrentTime: media.playlistCurrentTime,
-          playlistDuration: media.playlistDuration,
-          frameRate: media.frameRate,
-          currentFrame: media.currentFrame,
-          activeClipId: media.activeClipId,
-          sourceLabel: media.sourceLabel,
-        }),
-      )
+      // In annotate mode mask strokes are irrelevant — hide them entirely.
+      if (annotatorMode === 'annotate') {
+        filtered = filtered.filter((annotation) => !annotation.maskRegion)
+      }
+      // In mask mode: active layer's mask strokes always show; other mask layers
+      // show only when their visible flag is true (reference toggled via the panel eye icon).
+      // Non-mask annotations are hidden by default and shown only when the
+      // "Show annotations" toolbar toggle is on.
+      if (annotatorMode === 'mask') {
+        if (!showAnnotationsInMaskMode) {
+          filtered = filtered.filter((annotation) => annotation.maskRegion)
+        }
+        if (activeMaskLayerId) {
+          const visibleMaskLayerIds = new Set(
+            (maskLayers ?? [])
+              .filter((l) => l.id === activeMaskLayerId || l.visible)
+              .map((l) => l.id),
+          )
+          filtered = filtered.filter(
+            (annotation) => !annotation.maskRegion || visibleMaskLayerIds.has(annotation.layerId),
+          )
+        }
+      }
+      return filtered
     },
-    [adapter, adapterVersion, annotations, videoAdapter],
+    [activeMaskLayerId, adapter, adapterVersion, annotatorMode, annotations, maskLayers, showAnnotationsInMaskMode, videoAdapter],
   )
   const selectedAnnotation = useMemo(
     () => (selectedId ? annotations.find((annotation) => annotation.id === selectedId) : undefined),
@@ -346,19 +393,55 @@ export function AnnotationViewport({
   const diagnostics = adapter.getDiagnostics?.() ?? []
   const selectedAnnotationIsVisible = Boolean(selectedAnnotation && annotationMatchesViewer(selectedAnnotation, adapter))
   const viewerToolbarGroups = useMemo<ViewerToolbarGroup[]>(() => {
-    // Mask tools (brush/polygon) drive still-image mask rasterization, which has no
-    // per-frame meaning on video — drop them from the video toolset.
-    const toolIds: ViewerToolbarToolId[] = adapter.space === 'image2d'
-      ? videoAdapter
-        ? ['select', 'freehand', 'rectangle', 'ellipse', 'text', 'card']
-        : ['select', 'freehand', 'brush', 'polygon', 'rectangle', 'ellipse', 'text', 'card']
-      : ['select', 'freehand', 'rectangle', 'ellipse']
+    // Mask mode (brush/polygon) only applies to still images; video and 3D use annotate-only.
+    const isMaskCapable = adapter.space === 'image2d' && !videoAdapter
+
+    const modeGroup: ViewerToolbarGroup = {
+      id: 'mode',
+      items: isMaskCapable ? [
+        {
+          id: 'mode-annotate',
+          label: 'Annotate',
+          icon: VIEWER_TOOL_ICONS.annotateMode,
+          active: annotatorMode === 'annotate',
+          onSelect: () => {
+            onAnnotatorModeChange('annotate')
+            if (activeTool === 'brush' || activeTool === 'polygon') {
+              onToolChange('select')
+            }
+          },
+        },
+        {
+          id: 'mode-mask',
+          label: 'Mask',
+          icon: VIEWER_TOOL_ICONS.maskMode,
+          active: annotatorMode === 'mask',
+          onSelect: () => {
+            onAnnotatorModeChange('mask')
+            if (activeTool !== 'select' && activeTool !== 'brush' && activeTool !== 'polygon') {
+              onToolChange('brush')
+            }
+          },
+        },
+      ] : [],
+    }
+
+    let toolIds: ViewerToolbarToolId[]
+    if (adapter.space !== 'image2d') {
+      toolIds = ['select', 'freehand', 'rectangle', 'ellipse']
+    } else if (videoAdapter) {
+      toolIds = ['select', 'freehand', 'rectangle', 'ellipse', 'text', 'card']
+    } else if (annotatorMode === 'mask') {
+      toolIds = ['select', 'brush', 'polygon']
+    } else {
+      toolIds = ['select', 'freehand', 'rectangle', 'ellipse', 'text', 'card']
+    }
 
     const toolLabels: Record<ViewerToolbarToolId, string> = {
       select: 'Select',
       freehand: 'Freehand',
-      brush: 'Brush (mask)',
-      polygon: 'Polygon (mask)',
+      brush: 'Brush',
+      polygon: 'Polygon',
       rectangle: 'Rectangle',
       ellipse: 'Ellipse',
       text: 'Text',
@@ -423,23 +506,41 @@ export function AnnotationViewport({
       })
     }
 
+    const maskDisplayGroup: ViewerToolbarGroup = {
+      id: 'mask-display',
+      items: annotatorMode === 'mask' ? [
+        {
+          id: 'show-annotations',
+          label: showAnnotationsInMaskMode ? 'Hide annotations' : 'Show annotations',
+          icon: Layers,
+          active: showAnnotationsInMaskMode,
+          onSelect: () => setShowAnnotationsInMaskMode((v) => !v),
+        },
+      ] : [],
+    }
+
     return [
+      modeGroup,
       toolGroup,
+      maskDisplayGroup,
       historyGroup,
       { id: 'viewer', items: contextItems },
     ]
   }, [
     activeTool,
     adapter,
+    annotatorMode,
     canRedo,
     canUndo,
     isParametersPanelOpen,
+    onAnnotatorModeChange,
     onDeleteSelected,
     onRedo,
     onToolChange,
     onUndo,
     selectedAnnotationIsVisible,
     selectedImageAnnotation,
+    showAnnotationsInMaskMode,
     videoAdapter,
     viewerActions,
     viewport,
@@ -711,12 +812,12 @@ export function AnnotationViewport({
       const initialPoints = pipeline.addPoint({ x: 0, y: 0, timestamp })
       return {
         id: crypto.randomUUID(),
-        layerId: DEFAULT_LAYER_ID,
+        layerId: activeMaskLayerId ?? DEFAULT_LAYER_ID,
         frame,
         geometry: {
           kind: 'brush',
           points: initialPoints.length > 0 ? initialPoints : [{ x: 0, y: 0 }],
-          radius: BRUSH_DEFAULT_RADIUS,
+          radius: BRUSH_SCREEN_RADIUS_PX / getFrameScale(frame),
         },
         style: {
           stroke: authorColor,
@@ -983,7 +1084,7 @@ export function AnnotationViewport({
         polygonPointsRef.current = [{ x: 0, y: 0 }]
         setDraft({
           id: crypto.randomUUID(),
-          layerId: DEFAULT_LAYER_ID,
+          layerId: activeMaskLayerId ?? DEFAULT_LAYER_ID,
           frame,
           geometry: { kind: 'polygon', points: [{ x: 0, y: 0 }, { x: 0, y: 0 }] },
           style: {

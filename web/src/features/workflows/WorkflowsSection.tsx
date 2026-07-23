@@ -7,7 +7,7 @@ import { getAttachments } from '../../api/intents';
 import { getAttachmentsForShot } from './mockApi';
 import { FanOutPlanModal } from './FanOutPlanModal';
 import { useRunPanelStore } from './runPanelStore';
-import type { AssetNode, WorkflowAttachment } from './types';
+import type { AssetNode, OutputBinding, WorkflowAttachment } from './types';
 
 export type WorkflowsTarget =
   | { kind: 'asset'; asset: AssetSummary }
@@ -27,7 +27,13 @@ const NODE_KIND_COLORS: Record<AssetNode['kind'], string> = {
   pin: 'gray',
 };
 
-function nodeDescription(node: AssetNode): string {
+const TARGET_LABELS: Record<string, string> = {
+  new_version_of_self: 'new version of this asset',
+  new_asset: 'new asset',
+  discard: 'discard',
+};
+
+function nodeDescription(node: AssetNode, bindings?: OutputBinding[]): string {
   switch (node.kind) {
     case 'self':
       return node.label;
@@ -35,8 +41,11 @@ function nodeDescription(node: AssetNode): string {
       return `${node.label} · ${node.role}.${node.referenceSlot} @ ${node.policy}`;
     case 'asset_query':
       return `${node.label} · ${node.criteria.process} related to {Character} @ ${node.criteria.ref}`;
-    case 'output':
-      return `slot ${node.slot}`;
+    case 'output': {
+      const binding = bindings?.find((b) => b.slot === node.slot);
+      const dest = binding ? (TARGET_LABELS[binding.target] ?? binding.target) : 'no binding';
+      return `${node.slot} → ${dest}`;
+    }
     case 'pin':
       return `${node.label} (${node.dataType})`;
   }
@@ -71,7 +80,7 @@ function GraphInterfacePopover({ attachment }: { attachment: WorkflowAttachment 
                 {node.kind.replace('_', ' ')}
               </Badge>
               <Text size="xs" c="dimmed" truncate>
-                {nodeDescription(node)}
+                {nodeDescription(node, attachment.outputs)}
               </Text>
             </Group>
           ))}
@@ -150,6 +159,17 @@ export function WorkflowsSection({ target, onRunOpen }: { target: WorkflowsTarge
                     ? 'fan-out · one run per frame'
                     : `${MODE_LABELS[attachment.mode]} · ${attachment.level}-level attachment`}
                 </Text>
+                {attachment.outputs.length > 0 && (
+                  <Group gap={4} mt={3} wrap="wrap">
+                    {attachment.outputs.map((b) => (
+                      <Text key={b.slot} size="xs" c="dimmed" ff="monospace">
+                        {b.slot}
+                        <span style={{ opacity: 0.5 }}> → </span>
+                        {TARGET_LABELS[b.target] ?? b.target}
+                      </Text>
+                    ))}
+                  </Group>
+                )}
               </div>
               <GraphInterfacePopover attachment={attachment} />
               <Button

@@ -59,6 +59,7 @@ function _normaliseAttachment(raw: Record<string, unknown>): WorkflowAttachment 
       nodes: (graph.nodes as WorkflowAttachment['graph']['nodes']) ?? [],
       views: (graph.views as WorkflowAttachment['graph']['views']) ?? [],
     },
+    outputs: (raw.outputs as WorkflowAttachment['outputs']) ?? [],
   } as WorkflowAttachment;
 }
 

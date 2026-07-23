@@ -26,7 +26,7 @@ from functools import lru_cache
 
 from asgiref.sync import async_to_sync
 from django.core.paginator import Paginator
-from django.db.models import Count, Q
+from django.db.models import Count, Max, OuterRef, Q, Subquery
 from django.shortcuts import get_object_or_404
 from pgvector.django import CosineDistance
 from rest_framework import permissions, status
@@ -109,10 +109,22 @@ def query_embedding(text):
 
 
 def asset_summary(asset):
-    """Compact shape the grid renders from — one dict, no nested fetches."""
+    """Compact shape the grid renders from — one dict, no nested fetches.
+
+    Reads ``latest_version_number`` from an annotated attribute when present
+    (set by ``_annotate_latest_version``), falling back to a per-row query only
+    when called outside a bulk context (e.g. upload response).
+    """
     data = asset.type_data or {}
     technical = data.get("technical_metadata") or {}
     tags = list(dict.fromkeys((data.get("tags") or []) + (data.get("ai_suggested_tags") or [])))
+    latest_version_number = getattr(asset, "_latest_version_number", _MISSING)
+    if latest_version_number is _MISSING:
+        latest_version_number = (
+            asset.versions.order_by("-version_number")
+            .values_list("version_number", flat=True)
+            .first()
+        )
     return {
         "id": asset.id,
         "code": asset.code,
@@ -135,10 +147,23 @@ def asset_summary(asset):
         "ai_analysis_status": asset.ai_analysis_status,
         "project_code": asset.project_code or "",
         "created_at": asset.created_at.isoformat(),
-        "latest_version_number": (
-            asset.versions.order_by("-version_number").values_list("version_number", flat=True).first()
-        ),
+        "latest_version_number": latest_version_number,
     }
+
+
+_MISSING = object()
+
+
+def _annotate_latest_version(queryset):
+    """Add ``_latest_version_number`` to each row via a correlated subquery."""
+    from .models.versions import Version  # local import avoids circular at module load
+
+    latest_version = (
+        Version.objects.filter(entity=OuterRef("pk"))
+        .order_by("-version_number")
+        .values("version_number")[:1]
+    )
+    return queryset.annotate(_latest_version_number=Subquery(latest_version))
 
 
 class LibraryUploadView(APIView):
@@ -255,7 +280,10 @@ class LibrarySearchView(APIView):
 
             start = (page_number - 1) * page_size
             page_ids = ordered_ids[start : start + page_size]
-            assets = {a.pk: a for a in MediaAsset.objects.filter(pk__in=page_ids)}
+            assets = {
+                a.pk: a
+                for a in _annotate_latest_version(MediaAsset.objects.filter(pk__in=page_ids))
+            }
             results = []
             for pk in page_ids:
                 asset = assets.get(pk)
@@ -275,7 +303,7 @@ class LibrarySearchView(APIView):
                 }
             )
 
-        queryset = queryset.order_by("-created_at")
+        queryset = _annotate_latest_version(queryset).order_by("-created_at")
         facets = self.build_facets(queryset)
         paginator = Paginator(queryset, page_size)
         page = paginator.get_page(page_number)
@@ -395,7 +423,7 @@ def board_summary(board):
 
 def hydrate_assets(asset_ids):
     """Map asset_id -> grid summary for every referenced canvas item."""
-    assets = MediaAsset.objects.filter(id__in=set(asset_ids))
+    assets = _annotate_latest_version(MediaAsset.objects.filter(id__in=set(asset_ids)))
     return {asset.id: asset_summary(asset) for asset in assets}
 
 

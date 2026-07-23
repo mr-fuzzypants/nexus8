@@ -106,9 +106,25 @@ class WorkflowRegisterView(APIView):
 
         # Keep "follow latest" attachments in sync with the newly scanned interface.
         from .models import WorkflowAttachment
+        follow_latest = list(
+            WorkflowAttachment.objects.filter(workflow=entity, workflow_version__isnull=True)
+        )
         WorkflowAttachment.objects.filter(
             workflow=entity, workflow_version__isnull=True
         ).update(graph_interface=scanned)
+
+        # Reconcile output bindings: add newly-discovered output slots with a
+        # mode-appropriate default; preserve existing slot targets unchanged.
+        new_output_nodes = [n for n in (scanned.get("nodes") or []) if n.get("kind") == "output"]
+        for att in follow_latest:
+            existing_slots = {b["slot"] for b in (att.output_bindings or [])}
+            added = [n for n in new_output_nodes if n.get("slot") not in existing_slots]
+            if added:
+                default_target = {"iterate": "new_version_of_self", "derive": "new_asset"}.get(att.mode, "discard")
+                att.output_bindings = (att.output_bindings or []) + [
+                    {"slot": n["slot"], "target": default_target} for n in added
+                ]
+                att.save(update_fields=["output_bindings"])
 
         return Response(
             {

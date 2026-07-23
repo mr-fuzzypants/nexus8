@@ -33,9 +33,20 @@ class EntityRelation(Trackable):
         on_delete=models.SET_NULL,
         related_name="entity_relations",
     )
+    # Which version of `entity` was current when this relation was created.
+    # Lets callers resolve the destination URI without an extra query.
+    entity_version = models.ForeignKey(
+        Version,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="entity_version_relations",
+    )
+    entity_version_number = models.IntegerField(null=True, blank=True, db_index=True)
     role = models.CharField(max_length=32, db_index=True)
     confidence = models.FloatField(default=1.0)
     source = models.CharField(max_length=8, choices=RELATION_SOURCES, default="user")
+    type_data = models.JSONField(default=dict, blank=True)
 
     class Meta:
         constraints = [

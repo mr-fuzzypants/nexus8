@@ -94,6 +94,182 @@
   background: var(--participant-color, #5eead4);
 }
 
+.annotator-page__main {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+.annotator-page__mask-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 220px;
+  flex-shrink: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ── Mask layers panel ── */
+
+.mask-layers-panel {
+  display: flex;
+  flex-direction: column;
+  width: 220px;
+  flex-shrink: 0;
+  border-radius: 22px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(15, 23, 42, 0.74);
+  overflow: hidden;
+}
+
+.mask-layers-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.mask-layers-panel__title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.mask-layers-panel__add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(94, 234, 212, 0.3);
+  border-radius: 8px;
+  background: rgba(13, 148, 136, 0.16);
+  color: #5eead4;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.mask-layers-panel__add:hover {
+  background: rgba(13, 148, 136, 0.3);
+  border-color: rgba(94, 234, 212, 0.54);
+}
+
+.mask-layers-panel__empty {
+  padding: 20px 16px;
+  font-size: 12px;
+  color: rgba(148, 163, 184, 0.6);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.mask-layers-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.mask-layers-panel__layer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background 0.1s ease;
+}
+
+.mask-layers-panel__layer:hover {
+  background: rgba(148, 163, 184, 0.07);
+}
+
+.mask-layers-panel__layer.is-active {
+  background: rgba(94, 234, 212, 0.07);
+  border-left-color: rgba(94, 234, 212, 0.6);
+}
+
+.mask-layers-panel__layer.is-hidden .mask-layers-panel__name {
+  opacity: 0.45;
+}
+
+.mask-layers-panel__swatch {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.mask-layers-panel__name {
+  flex: 1;
+  font-size: 13px;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.mask-layers-panel__name-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 13px;
+  background: rgba(2, 6, 23, 0.8);
+  border: 1px solid rgba(94, 234, 212, 0.4);
+  border-radius: 6px;
+  color: #e2e8f0;
+  outline: none;
+}
+
+.mask-layers-panel__actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.mask-layers-panel__layer:hover .mask-layers-panel__actions,
+.mask-layers-panel__layer.is-active .mask-layers-panel__actions {
+  opacity: 1;
+}
+
+.mask-layers-panel__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(148, 163, 184, 0.7);
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+  padding: 0;
+}
+
+.mask-layers-panel__action:hover:not(:disabled) {
+  background: rgba(148, 163, 184, 0.14);
+  color: #e2e8f0;
+}
+
+.mask-layers-panel__action:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.mask-layers-panel__action--danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.16);
+  color: #fca5a5;
+}
+
 .viewer-card {
   display: flex;
   flex-direction: column;
@@ -198,6 +374,27 @@
 
 .viewer-toolbar__button.is-danger {
   color: #fda4af;
+}
+
+/* Mode switcher buttons (Annotate / Mask) sit in the first group and get a
+   slightly warmer inactive state so they read as a segmented control. */
+.viewer-toolbar__group:first-child .viewer-toolbar__button {
+  min-width: 40px;
+  background: rgba(148, 163, 184, 0.07);
+  border-color: rgba(148, 163, 184, 0.16);
+  color: rgba(226, 232, 240, 0.7);
+}
+
+.viewer-toolbar__group:first-child .viewer-toolbar__button:hover:not(:disabled) {
+  border-color: rgba(94, 234, 212, 0.42);
+  color: #e2e8f0;
+}
+
+.viewer-toolbar__group:first-child .viewer-toolbar__button.is-active {
+  border-color: rgba(94, 234, 212, 0.6);
+  background: linear-gradient(135deg, rgba(13, 148, 136, 0.32), rgba(45, 212, 191, 0.2));
+  color: #ccfbf1;
+  box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.18);
 }
 
 .viewer-toolbar__button:disabled {
@@ -720,4 +917,71 @@
 .video-transport__frame,
 .video-transport__fps {
   color: rgba(148, 163, 184, 0.86);
+}
+
+/* ── Mask layer detail panel ── */
+
+.mask-layer-detail-panel {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mask-layer-detail-panel__title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.7);
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mask-layer-detail-panel__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mask-layer-detail-panel__label {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.65);
+}
+
+.mask-layer-detail-panel__select,
+.mask-layer-detail-panel__input,
+.mask-layer-detail-panel__textarea {
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 5px;
+  color: rgba(226, 232, 240, 0.9);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px 8px;
+  width: 100%;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.mask-layer-detail-panel__select:focus,
+.mask-layer-detail-panel__input:focus,
+.mask-layer-detail-panel__textarea:focus {
+  border-color: rgba(94, 234, 212, 0.5);
+}
+
+.mask-layer-detail-panel__select option {
+  background: #0f172a;
+}
+
+.mask-layer-detail-panel__textarea {
+  resize: vertical;
+  min-height: 56px;
 }
