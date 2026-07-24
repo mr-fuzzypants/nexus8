@@ -254,6 +254,7 @@ class BlobStatView(APIView):
                     rel.entity.entity_type, rel.entity_version_number, rel.entity_version,
                 ),
                 "role": rel.role,
+                "type_data": rel.type_data or {},
             }
             for rel in outgoing_qs
         ]
@@ -272,6 +273,7 @@ class BlobStatView(APIView):
                     rel.asset.entity_type, rel.entity_version_number, rel.entity_version,
                 ),
                 "role": rel.role,
+                "type_data": rel.type_data or {},
             }
             for rel in incoming_qs
         ]
