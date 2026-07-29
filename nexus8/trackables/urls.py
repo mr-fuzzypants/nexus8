@@ -66,6 +66,10 @@ from .views_projects import (
     ProjectListView,
 )
 from .views_blob import BlobResolveView, BlobStatView
+from .views_inpaint import MaskInpaintStatusView, MaskInpaintTriggerView
+from .views_scribble import ScribbleDraftView, ScribbleStatusView, ScribbleTriggerView
+from .views_erase import EraseImageStatusView, EraseImageTriggerView
+from .views_sketch_inpaint import SketchInpaintStatusView, SketchInpaintTriggerView
 from .views_workflow import WorkflowDetailView, WorkflowRegisterView
 from .views_runs import (
     AssetProvenanceView,
@@ -112,6 +116,15 @@ urlpatterns = [
     path('api/library/collections/', CollectionCreateView.as_view(), name='library-collections'),
     # Annotator (2D tiled viewer) endpoints
     path('api/library/assets/<int:pk>/', LibraryAssetDetailView.as_view(), name='library-asset-detail'),
+    path('api/library/assets/<int:pk>/mask/inpaint/', MaskInpaintTriggerView.as_view(), name='library-asset-mask-inpaint'),
+    path('api/library/assets/<int:pk>/mask/inpaint/status/', MaskInpaintStatusView.as_view(), name='library-asset-mask-inpaint-status'),
+    path('api/library/assets/<int:pk>/scribble/', ScribbleTriggerView.as_view(), name='library-asset-scribble'),
+    path('api/library/assets/<int:pk>/scribble/status/', ScribbleStatusView.as_view(), name='library-asset-scribble-status'),
+    path('api/library/assets/<int:pk>/scribble/draft/', ScribbleDraftView.as_view(), name='library-asset-scribble-draft'),
+    path('api/library/assets/<int:pk>/erase/', EraseImageTriggerView.as_view(), name='library-asset-erase'),
+    path('api/library/assets/<int:pk>/erase/status/', EraseImageStatusView.as_view(), name='library-asset-erase-status'),
+    path('api/library/assets/<int:pk>/sketch-inpaint/', SketchInpaintTriggerView.as_view(), name='library-asset-sketch-inpaint'),
+    path('api/library/assets/<int:pk>/sketch-inpaint/status/', SketchInpaintStatusView.as_view(), name='library-asset-sketch-inpaint-status'),
     path('api/library/assets/<int:pk>/mask/', MaskSaveView.as_view(), name='library-asset-mask'),
     path('api/library/assets/<int:pk>/masks/', AssetMasksView.as_view(), name='library-asset-masks'),
     path('api/library/annotations/', AnnotationDocListCreateView.as_view(), name='library-annotations'),

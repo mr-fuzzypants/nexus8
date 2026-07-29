@@ -81,6 +81,7 @@ class Version(Trackable):
         VersionedEntity, on_delete=models.CASCADE, related_name="versions"
     )
     version_number = models.PositiveIntegerField()
+    variation_number = models.PositiveIntegerField(default=0)
     data = models.JSONField(default=dict, blank=True)
 
     # Hash of the published content (e.g. file sha256). Makes reproduction
@@ -108,10 +109,11 @@ class Version(Trackable):
     objects = VersionQueryManager()
 
     class Meta:
-        ordering = ["-version_number"]
+        ordering = ["-version_number", "-variation_number"]
         constraints = [
             models.UniqueConstraint(
-                fields=["entity", "version_number"], name="unique_version_per_entity"
+                fields=["entity", "version_number", "variation_number"],
+                name="unique_version_variation_per_entity",
             ),
         ]
         indexes = [
@@ -120,7 +122,7 @@ class Version(Trackable):
         ]
 
     def __str__(self):
-        return f"{self.entity.code} v{self.version_number}"
+        return f"{self.entity.code} v{self.version_number}.{self.variation_number}"
 
     @classmethod
     def get_by_json_field(cls, field_path, value, entity=None):

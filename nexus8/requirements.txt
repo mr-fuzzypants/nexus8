@@ -8,3 +8,5 @@ pgvector>=0.4
 aiohttp>=3.13
 django-cors-headers>=4.4
 Pillow>=10.4
+# Live inpainting dispatch (views_inpaint.py -> modal_functions/inpaint.py on modal.com)
+modal>=1.5
