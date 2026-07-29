@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { useLocation, useSearch } from 'wouter'
 import { useQuery } from '@tanstack/react-query'
 import * as Y from 'yjs'
@@ -19,15 +19,24 @@ import { BroadcastCollaborationRoom } from './core/collaboration/broadcast'
 import type { ViewerAdapter } from './core/viewers/adapters'
 import {
   getAsset,
+  getEraseStatus,
+  getInpaintStatus,
   getOrCreateAnnotationDoc,
+  getScribbleStatus,
   saveDocState,
   saveMask,
   snapshotAnnotationDoc,
+  triggerErase,
+  triggerInpaint,
+  triggerScribble,
+  triggerScribbleDraft,
+  triggerSketchInpaint,
+  getSketchInpaintStatus,
   type AnnotationDoc,
 } from './annotatorApi'
 import { getVersionHistory } from '../../api/versions'
-import { isMaskShape, rasterizeMask } from './rasterizeMask'
-import { framePointToWorld } from './core/annotations/geometry'
+import { isMaskShape, rasterizeMask, rasterizeScribble, rasterizeSketchInpaintGuide } from './rasterizeMask'
+import { computeMaskBounds } from './maskBounds'
 import { MaskLayersPanel } from './components/MaskLayersPanel'
 import { MaskLayerDetailPanel } from './components/MaskLayerDetailPanel'
 import { DEFAULT_LAYER_ID } from './core/annotations/types'
@@ -35,6 +44,11 @@ import type { AnnotationLayer, MaskOp } from './core/annotations/types'
 import './annotator.css'
 
 const PROFILE_COLORS = ['#5eead4', '#f97316', '#60a5fa', '#f472b6', '#a78bfa', '#facc15']
+// Live-inpaint pacing: debounce after stroke commit, then poll the dispatch.
+// 500ms polling (not tighter) — inference is ≥1.5s so faster polling only adds chatter.
+const LIVE_DEBOUNCE_MS = 400
+const POLL_INTERVAL_MS = 500
+const LIVE_GEN_TIMEOUT_MS = 90_000
 const MASK_LAYER_COLORS = ['#f97316', '#a78bfa', '#34d399', '#f472b6', '#60a5fa', '#facc15', '#fb923c', '#e879f9']
 const PROFILE_STORAGE_KEY = 'nexus8-annotator-profile'
 function hashString(value: string) {
@@ -193,6 +207,80 @@ function AnnotatorWorkspace({
   const [annotatorMode, setAnnotatorMode] = useState<'annotate' | 'mask'>('annotate')
   const [activeMaskLayerId, setActiveMaskLayerId] = useState<string | null>(null)
   const [maskGenerateState, setMaskGenerateState] = useState<Record<string, 'idle' | 'working' | string>>({})
+  const [previewMode, setPreviewMode] = useState(false)
+  const [imageDims, setImageDims] = useState<{ width: number; height: number } | null>(null)
+  const [liveGenEnabled, setLiveGenEnabled] = useState(false)
+  const [liveGenStatus, setLiveGenStatus] = useState<{
+    phase: 'idle' | 'saving' | 'generating' | 'error'
+    latencyS?: number
+    message?: string
+    seedUsed?: number
+  }>({ phase: 'idle' })
+  const [livePreviewImage, setLivePreviewImage] = useState<HTMLImageElement | null>(null)
+  const [livePreviewIsScribble, setLivePreviewIsScribble] = useState(false)
+  // Batch generation variants: populated when a run returns >1 image. The strip
+  // lets the user pick which variant shows as the live preview overlay.
+  const [liveVariants, setLiveVariants] = useState<{ img: HTMLImageElement; seed?: number }[]>([])
+  const [liveVariantIndex, setLiveVariantIndex] = useState(0)
+  const liveDebounceRef = useRef<number | null>(null)
+  const livePollTimerRef = useRef<number | null>(null)
+  // Object URL of the current draft preview — revoked when the next draft replaces it.
+  const draftUrlRef = useRef<string | null>(null)
+  // Monotonic generation counter: bumping it aborts in-flight debounce/poll work
+  // and marks any late-arriving results as stale (SRED H6 invalidation).
+  const liveGenerationRef = useRef(0)
+
+  useEffect(() => {
+    let cancelled = false
+    if (asset.width && asset.height) {
+      setImageDims({ width: asset.width, height: asset.height })
+      return
+    }
+    if (asset.file_path) {
+      loadImageSize(asset.file_path).then((dims) => {
+        if (!cancelled && dims) {
+          setImageDims(dims)
+        }
+      })
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [asset])
+
+  function invalidateLiveGeneration() {
+    liveGenerationRef.current += 1
+    if (liveDebounceRef.current != null) {
+      window.clearTimeout(liveDebounceRef.current)
+      liveDebounceRef.current = null
+    }
+    if (livePollTimerRef.current != null) {
+      window.clearTimeout(livePollTimerRef.current)
+      livePollTimerRef.current = null
+    }
+    setLivePreviewIsScribble(false)
+    setLivePreviewImage((prev) => (prev ? null : prev))
+    setLiveVariants((prev) => (prev.length ? [] : prev))
+    setLiveVariantIndex(0)
+    setLiveGenStatus((prev) =>
+      prev.phase !== 'idle' || prev.latencyS != null || prev.seedUsed != null
+        ? { phase: 'idle' }
+        : prev,
+    )
+  }
+
+  // Stale overlays never survive a layer switch; timers never survive unmount.
+  useEffect(() => {
+    invalidateLiveGeneration()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMaskLayerId])
+  useEffect(
+    () => () => {
+      if (liveDebounceRef.current != null) window.clearTimeout(liveDebounceRef.current)
+      if (livePollTimerRef.current != null) window.clearTimeout(livePollTimerRef.current)
+    },
+    [],
+  )
 
   // Create the viewer adapter + collaboration room inside the effect so it is
   // StrictMode-safe (created and destroyed together, recreated on remount).
@@ -353,91 +441,538 @@ function AnnotatorWorkspace({
     room.store.upsertLayer({ ...below, order: current.order ?? index })
   }
 
-  function handleUpdateMaskLayer(id: string, fields: Partial<Pick<AnnotationLayer, 'mask_op' | 'prompt' | 'reference'>>) {
+  function handleUpdateMaskLayer(id: string, fields: Partial<Pick<AnnotationLayer, 'mask_op' | 'prompt' | 'negative_prompt' | 'reference' | 'gen_mode' | 'controlnet_scale' | 'guidance_scale' | 'num_inference_steps' | 'scribble_scope' | 'seed' | 'num_variants' | 'denoise_strength' | 'reference_scale'>>) {
     const layer = maskLayers.find((l) => l.id === id)
     if (layer) {
       room.store.upsertLayer({ ...layer, ...fields })
     }
   }
 
-  async function handleGenerateMaskForLayer(layerId: string) {
-    const layerShapes = snapshot.annotations.filter(
+  /** Rasterize a layer's mask strokes and upload them (with the layer's current
+   *  op/prompt/reference metadata). Reads the live store snapshot rather than the
+   *  React one — callers may run before React has re-rendered a fresh commit.
+   *  Throws with a user-facing message on precondition failures. */
+  async function rasterizeAndSaveLayerMask(layerId: string): Promise<AssetSummary | null> {
+    const liveSnapshot = room.store.getSnapshot()
+    const layerShapes = liveSnapshot.annotations.filter(
       (a) => isMaskShape(a) && a.layerId === layerId,
     )
     if (layerShapes.length === 0) {
-      setMaskGenerateState((s) => ({ ...s, [layerId]: 'Draw strokes on this layer first' }))
-      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
-      return
+      throw new Error('Draw strokes on this layer first')
     }
-    setMaskGenerateState((s) => ({ ...s, [layerId]: 'working' }))
-    const fileDims = asset.file_path ? await loadImageSize(asset.file_path) : null
-    const width = fileDims?.width ?? asset.width ?? 0
-    const height = fileDims?.height ?? asset.height ?? 0
+    const dims = imageDims ?? (asset.file_path ? await loadImageSize(asset.file_path) : null)
+    const width = dims?.width ?? asset.width ?? 0
+    const height = dims?.height ?? asset.height ?? 0
     if (!width || !height) {
-      setMaskGenerateState((s) => ({ ...s, [layerId]: 'Dimensions unknown' }))
+      throw new Error('Dimensions unknown')
+    }
+    const blob = await rasterizeMask(layerShapes, width, height)
+    if (!blob) {
+      return null
+    }
+    const layer = liveSnapshot.layers.find((l) => l.id === layerId)
+    const bounds = computeMaskBounds(layerShapes)
+    const maskDims = bounds
+      ? {
+          x: Math.max(0, Math.round(bounds.x)),
+          y: Math.max(0, Math.round(bounds.y)),
+          w: Math.round(Math.min(bounds.x + bounds.w, width) - Math.max(0, bounds.x)),
+          h: Math.round(Math.min(bounds.y + bounds.h, height) - Math.max(0, bounds.y)),
+        }
+      : undefined
+    return saveMask(asset.id, blob, {
+      annotationId: doc.id,
+      name: `${asset.name}-${layer?.name ?? 'mask'}`,
+      versionNumber,
+      layerId,
+      maskOp: layer?.mask_op,
+      prompt: layer?.prompt,
+      reference: layer?.reference,
+      maskDims,
+    })
+  }
+
+  async function handleGenerateMaskForLayer(layerId: string) {
+    setMaskGenerateState((s) => ({ ...s, [layerId]: 'working' }))
+    try {
+      const mask = await rasterizeAndSaveLayerMask(layerId)
+      setMaskGenerateState((s) => ({ ...s, [layerId]: mask ? `Saved ${mask.code}` : 'idle' }))
+      if (mask) {
+        window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'idle'
+      setMaskGenerateState((s) => ({ ...s, [layerId]: message }))
       window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
+    }
+  }
+
+  /** Dispatch the layer's mask_op to its generation runner. No-op when the op
+   *  is unrunnable or a required prompt is missing. Shared by live stroke-commit
+   *  generation and the explicit Regenerate button. */
+  function runGenerationForLayer(layerId: string) {
+    const layer = room.store.getSnapshot().layers.find((l) => l.id === layerId)
+    const op = layer?.mask_op
+    const eligible =
+      (op === 'inpaint' && layer?.prompt?.trim()) ||
+      (op === 'scribble' && layer?.prompt?.trim()) ||
+      (op === 'sketch_inpaint' && layer?.prompt?.trim()) ||
+      op === 'remove'
+    if (!eligible) {
       return
     }
+    // A new run supersedes the previous batch — drop the stale variant strip.
+    setLiveVariants((prev) => (prev.length ? [] : prev))
+    setLiveVariantIndex(0)
+    if (op === 'inpaint') void runLiveGeneration(layerId)
+    else if (op === 'scribble') void runScribbleGeneration(layerId)
+    else if (op === 'sketch_inpaint') void runSketchInpaintGeneration(layerId)
+    else if (op === 'remove') void runEraseGeneration(layerId)
+  }
+
+  function handleMaskStrokeCommitted(layerId: string) {
+    if (!liveGenEnabled || layerId !== activeMaskLayerId) {
+      return
+    }
+    if (liveDebounceRef.current != null) {
+      window.clearTimeout(liveDebounceRef.current)
+    }
+    liveDebounceRef.current = window.setTimeout(() => {
+      liveDebounceRef.current = null
+      runGenerationForLayer(layerId)
+    }, LIVE_DEBOUNCE_MS)
+  }
+
+  /** Explicit regenerate: cancels any pending live-gen debounce, then runs the
+   *  layer's op immediately. Works regardless of the live-generation toggle. */
+  function handleRegenerateLayer(layerId: string) {
+    if (liveDebounceRef.current != null) {
+      window.clearTimeout(liveDebounceRef.current)
+      liveDebounceRef.current = null
+    }
+    runGenerationForLayer(layerId)
+  }
+
+  async function runLiveGeneration(layerId: string) {
+    const gen = ++liveGenerationRef.current
+    setLiveGenStatus({ phase: 'saving' })
     try {
-      const blob = await rasterizeMask(layerShapes, width, height)
-      if (!blob) {
-        setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' }))
+      const saved = await rasterizeAndSaveLayerMask(layerId)
+      if (!saved || gen !== liveGenerationRef.current) {
+        if (gen === liveGenerationRef.current) setLiveGenStatus({ phase: 'idle' })
         return
       }
-      const layer = maskLayers.find((l) => l.id === layerId)
-
-      // Compute the bounding box of all mask shapes in pixel coordinates.
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-      for (const shape of layerShapes) {
-        const pts: Array<{ x: number; y: number }> = []
-        const geom = shape.geometry
-        if (geom.kind === 'brush') {
-          const r = geom.radius
-          for (const p of geom.points) {
-            const w = framePointToWorld(shape.frame, p)
-            pts.push({ x: w.x - r, y: w.y - r })
-            pts.push({ x: w.x + r, y: w.y + r })
-          }
-        } else if (geom.kind === 'freehand' || geom.kind === 'polygon') {
-          for (const p of geom.points) {
-            const w = framePointToWorld(shape.frame, p)
-            pts.push({ x: w.x, y: w.y })
-          }
-        } else if (geom.kind === 'rectangle' || geom.kind === 'ellipse' || geom.kind === 'card' || geom.kind === 'grid' || geom.kind === 'list') {
-          const a = framePointToWorld(shape.frame, geom.start)
-          const b = framePointToWorld(shape.frame, geom.end)
-          pts.push({ x: a.x, y: a.y }, { x: b.x, y: b.y })
+      const layer = room.store.getSnapshot().layers.find((l) => l.id === layerId)
+      // Auto mode: a real prompt needs full CFG to be followed (LCM harmonizes
+      // but ignores semantics — see SRED finding F1), so default to quality.
+      const mode = layer?.gen_mode ?? (layer?.prompt?.trim() ? 'quality' : 'fast')
+      await triggerInpaint(asset.id, { layer_id: layerId, prompt: layer?.prompt, mode })
+      if (gen !== liveGenerationRef.current) {
+        return
+      }
+      setLiveGenStatus({ phase: 'generating' })
+      const startedAt = Date.now()
+      const poll = async () => {
+        if (gen !== liveGenerationRef.current) {
+          return
         }
-        for (const p of pts) {
-          if (p.x < minX) minX = p.x
-          if (p.y < minY) minY = p.y
-          if (p.x > maxX) maxX = p.x
-          if (p.y > maxY) maxY = p.y
+        if (Date.now() - startedAt > LIVE_GEN_TIMEOUT_MS) {
+          setLiveGenStatus({ phase: 'error', message: 'Generation timed out' })
+          return
+        }
+        try {
+          const status = await getInpaintStatus(asset.id, layerId)
+          if (gen !== liveGenerationRef.current) {
+            return
+          }
+          if (status.status === 'done' && status.result?.file_path) {
+            const img = new Image()
+            img.onload = () => {
+              if (gen === liveGenerationRef.current) {
+                setLivePreviewImage(img)
+                setLiveGenStatus({ phase: 'idle', latencyS: status.latency_s })
+              }
+            }
+            img.onerror = () => {
+              if (gen === liveGenerationRef.current) {
+                setLiveGenStatus({ phase: 'error', message: 'Could not load result image' })
+              }
+            }
+            img.src = status.result.file_path
+            return
+          }
+          if (status.status === 'error') {
+            setLiveGenStatus({ phase: 'error', message: status.detail ?? 'Generation failed' })
+            return
+          }
+          if (Date.now() - startedAt > 5000) {
+            setLiveGenStatus({ phase: 'generating', message: 'GPU warming up…' })
+          }
+        } catch {
+          // Transient poll failure — keep polling until the timeout cap.
+        }
+        livePollTimerRef.current = window.setTimeout(() => void poll(), POLL_INTERVAL_MS)
+      }
+      void poll()
+    } catch (error) {
+      if (gen === liveGenerationRef.current) {
+        setLiveGenStatus({
+          phase: 'error',
+          message: error instanceof Error ? error.message : 'Generation failed',
+        })
+      }
+    }
+  }
+
+  async function runScribbleGeneration(layerId: string) {
+    const gen = ++liveGenerationRef.current
+    setLiveGenStatus({ phase: 'saving' })
+    try {
+      const liveSnapshot = room.store.getSnapshot()
+      const layerShapes = liveSnapshot.annotations.filter(
+        (a) => isMaskShape(a) && a.layerId === layerId,
+      )
+      if (layerShapes.length === 0) {
+        setLiveGenStatus({ phase: 'idle' })
+        return
+      }
+      const dims = imageDims ?? (asset.file_path ? await loadImageSize(asset.file_path) : null)
+      const width = dims?.width ?? asset.width ?? 1024
+      const height = dims?.height ?? asset.height ?? 1024
+      if (!width || !height) {
+        setLiveGenStatus({ phase: 'idle' })
+        return
+      }
+      const blob = await rasterizeScribble(layerShapes, width, height)
+      if (!blob || gen !== liveGenerationRef.current) {
+        if (gen === liveGenerationRef.current) setLiveGenStatus({ phase: 'idle' })
+        return
+      }
+      const layer = liveSnapshot.layers.find((l) => l.id === layerId)
+      const scribbleScope = layer?.scribble_scope ?? 'full'
+
+      // For region mode, compute the bounding box of the sketch strokes.
+      let maskDims: { x: number; y: number; w: number; h: number } | undefined
+      if (scribbleScope === 'region') {
+        const bounds = computeMaskBounds(layerShapes)
+        if (bounds) {
+          maskDims = {
+            x: Math.max(0, Math.round(bounds.x)),
+            y: Math.max(0, Math.round(bounds.y)),
+            w: Math.round(Math.min(bounds.x + bounds.w, width) - Math.max(0, bounds.x)),
+            h: Math.round(Math.min(bounds.y + bounds.h, height) - Math.max(0, bounds.y)),
+          }
         }
       }
-      const maskDims = Number.isFinite(minX)
-        ? {
-            x: Math.max(0, Math.round(minX)),
-            y: Math.max(0, Math.round(minY)),
-            w: Math.round(Math.min(maxX, width) - Math.max(0, minX)),
-            h: Math.round(Math.min(maxY, height) - Math.max(0, minY)),
-          }
-        : undefined
 
-      const mask = await saveMask(asset.id, blob, {
+      // Draft mode: synchronous low-res generation with no asset round-trips.
+      // The scribble goes straight to Modal and the JPEG comes back in the same
+      // response — nothing is saved, so drafts don't pollute version history.
+      if (layer?.gen_mode === 'fast') {
+        setLiveGenStatus({ phase: 'generating' })
+        const startedAtDraft = Date.now()
+        const { imageUrl, seedUsed } = await triggerScribbleDraft(asset.id, {
+          scribble: blob,
+          prompt: layer.prompt ?? '',
+          controlnet_scale: layer.controlnet_scale,
+          num_inference_steps: layer.num_inference_steps,
+          seed: layer.seed,
+          width,
+          height,
+          scribble_mode: scribbleScope,
+          mask_dims: maskDims,
+        })
+        if (gen !== liveGenerationRef.current) {
+          URL.revokeObjectURL(imageUrl)
+          return
+        }
+        const img = await loadImageElement(imageUrl)
+        if (gen !== liveGenerationRef.current || !img) {
+          URL.revokeObjectURL(imageUrl)
+          if (gen === liveGenerationRef.current) {
+            setLiveGenStatus({ phase: 'error', message: 'Could not load draft image' })
+          }
+          return
+        }
+        if (draftUrlRef.current) URL.revokeObjectURL(draftUrlRef.current)
+        draftUrlRef.current = imageUrl
+        setLivePreviewIsScribble(scribbleScope === 'full')
+        setLiveVariants([])
+        setLiveVariantIndex(0)
+        setLivePreviewImage(img)
+        setLiveGenStatus({
+          phase: 'idle',
+          latencyS: (Date.now() - startedAtDraft) / 1000,
+          seedUsed,
+        })
+        return
+      }
+
+      await saveMask(asset.id, blob, {
         annotationId: doc.id,
-        name: `${asset.name}-${layer?.name ?? 'mask'}`,
+        name: `${asset.name}-${layer?.name ?? 'scribble'}`,
         versionNumber,
         layerId,
-        maskOp: layer?.mask_op,
+        maskOp: 'scribble',
         prompt: layer?.prompt,
-        reference: layer?.reference,
-        maskDims,
       })
-      setMaskGenerateState((s) => ({ ...s, [layerId]: `Saved ${mask.code}` }))
-      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
-    } catch {
-      setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' }))
+      if (gen !== liveGenerationRef.current) return
+      await triggerScribble(asset.id, {
+        layer_id: layerId,
+        prompt: layer?.prompt,
+        controlnet_scale: layer?.controlnet_scale,
+        guidance_scale: layer?.guidance_scale,
+        width,
+        height,
+        scribble_mode: scribbleScope,
+        mask_dims: maskDims,
+        seed: layer?.seed,
+        num_variants: layer?.num_variants,
+        num_inference_steps: layer?.num_inference_steps,
+      })
+      if (gen !== liveGenerationRef.current) return
+      setLiveGenStatus({ phase: 'generating' })
+      const startedAt = Date.now()
+      const poll = async () => {
+        if (gen !== liveGenerationRef.current) return
+        if (Date.now() - startedAt > LIVE_GEN_TIMEOUT_MS) {
+          setLiveGenStatus({ phase: 'error', message: 'Generation timed out' })
+          return
+        }
+        try {
+          const s = await getScribbleStatus(asset.id, layerId)
+          if (gen !== liveGenerationRef.current) return
+          if (s.status === 'done' && (s.results?.length || s.result?.file_path)) {
+            const entries = (s.results?.length ? s.results : [{ ...s.result!, seed: s.seed_used }])
+              .filter((e) => e.file_path)
+            const loaded = await Promise.all(entries.map((e) => loadImageElement(e.file_path!)))
+            if (gen !== liveGenerationRef.current) return
+            const variants = loaded
+              .map((img, i) => (img ? { img, seed: entries[i].seed } : null))
+              .filter((v): v is { img: HTMLImageElement; seed?: number } => v !== null)
+            if (!variants.length) {
+              setLiveGenStatus({ phase: 'error', message: 'Could not load result image' })
+              return
+            }
+            setLivePreviewIsScribble(scribbleScope === 'full')
+            setLiveVariants(variants.length > 1 ? variants : [])
+            setLiveVariantIndex(0)
+            setLivePreviewImage(variants[0].img)
+            setLiveGenStatus({
+              phase: 'idle',
+              latencyS: s.latency_s,
+              seedUsed: variants[0].seed ?? s.seed_used,
+            })
+            return
+          }
+          if (s.status === 'error') {
+            setLiveGenStatus({ phase: 'error', message: s.detail ?? 'Generation failed' })
+            return
+          }
+          if (Date.now() - startedAt > 5000) {
+            setLiveGenStatus({ phase: 'generating', message: 'GPU warming up…' })
+          }
+        } catch {
+          // Transient poll failure — keep polling until the timeout cap.
+        }
+        livePollTimerRef.current = window.setTimeout(() => void poll(), POLL_INTERVAL_MS)
+      }
+      void poll()
+    } catch (error) {
+      if (gen === liveGenerationRef.current) {
+        setLiveGenStatus({
+          phase: 'error',
+          message: error instanceof Error ? error.message : 'Generation failed',
+        })
+      }
+    }
+  }
+
+  /** Load an image element, resolving null on error so batch loads tolerate a bad variant. */
+  function loadImageElement(src: string): Promise<HTMLImageElement | null> {
+    return new Promise((resolve) => {
+      const img = new Image()
+      img.onload = () => resolve(img)
+      img.onerror = () => resolve(null)
+      img.src = src
+    })
+  }
+
+  async function runSketchInpaintGeneration(layerId: string) {
+    const gen = ++liveGenerationRef.current
+    setLiveGenStatus({ phase: 'saving' })
+    try {
+      const liveSnapshot = room.store.getSnapshot()
+      const layerShapes = liveSnapshot.annotations.filter(
+        (a) => isMaskShape(a) && a.layerId === layerId,
+      )
+      if (layerShapes.length === 0) {
+        setLiveGenStatus({ phase: 'idle' })
+        return
+      }
+      const dims = imageDims ?? (asset.file_path ? await loadImageSize(asset.file_path) : null)
+      const width = dims?.width ?? asset.width ?? 1024
+      const height = dims?.height ?? asset.height ?? 1024
+      if (!width || !height) {
+        setLiveGenStatus({ phase: 'idle' })
+        return
+      }
+      const bounds = computeMaskBounds(layerShapes)
+      if (!bounds) {
+        setLiveGenStatus({ phase: 'idle' })
+        return
+      }
+      const maskDims = {
+        x: Math.max(0, Math.round(bounds.x)),
+        y: Math.max(0, Math.round(bounds.y)),
+        w: Math.round(Math.min(bounds.x + bounds.w, width) - Math.max(0, bounds.x)),
+        h: Math.round(Math.min(bounds.y + bounds.h, height) - Math.max(0, bounds.y)),
+      }
+      const blob = await rasterizeSketchInpaintGuide(layerShapes, width, height)
+      if (!blob || gen !== liveGenerationRef.current) {
+        if (gen === liveGenerationRef.current) setLiveGenStatus({ phase: 'idle' })
+        return
+      }
+      const layer = liveSnapshot.layers.find((l) => l.id === layerId)
+      await saveMask(asset.id, blob, {
+        annotationId: doc.id,
+        name: `${asset.name}-${layer?.name ?? 'sketch-inpaint'}`,
+        versionNumber,
+        layerId,
+        maskOp: 'sketch_inpaint',
+        prompt: layer?.prompt,
+      })
+      if (gen !== liveGenerationRef.current) return
+      await triggerSketchInpaint(asset.id, {
+        layer_id: layerId,
+        prompt: layer?.prompt,
+        negative_prompt: layer?.negative_prompt,
+        controlnet_scale: layer?.controlnet_scale,
+        guidance_scale: layer?.guidance_scale,
+        num_inference_steps: layer?.num_inference_steps,
+        mask_dims: maskDims,
+        seed: layer?.seed,
+        num_variants: layer?.num_variants,
+        denoise_strength: layer?.denoise_strength,
+        reference: layer?.reference,
+        reference_scale: layer?.reference_scale,
+      })
+      if (gen !== liveGenerationRef.current) return
+      setLiveGenStatus({ phase: 'generating' })
+      const startedAt = Date.now()
+      const poll = async () => {
+        if (gen !== liveGenerationRef.current) return
+        if (Date.now() - startedAt > LIVE_GEN_TIMEOUT_MS) {
+          setLiveGenStatus({ phase: 'error', message: 'Generation timed out' })
+          return
+        }
+        try {
+          const s = await getSketchInpaintStatus(asset.id, layerId)
+          if (gen !== liveGenerationRef.current) return
+          if (s.status === 'done' && (s.results?.length || s.result?.file_path)) {
+            const entries = (s.results?.length ? s.results : [{ ...s.result!, seed: s.seed_used }])
+              .filter((e) => e.file_path)
+            const loaded = await Promise.all(entries.map((e) => loadImageElement(e.file_path!)))
+            if (gen !== liveGenerationRef.current) return
+            const variants = loaded
+              .map((img, i) => (img ? { img, seed: entries[i].seed } : null))
+              .filter((v): v is { img: HTMLImageElement; seed?: number } => v !== null)
+            if (!variants.length) {
+              setLiveGenStatus({ phase: 'error', message: 'Could not load result image' })
+              return
+            }
+            setLivePreviewIsScribble(false)
+            setLiveVariants(variants.length > 1 ? variants : [])
+            setLiveVariantIndex(0)
+            setLivePreviewImage(variants[0].img)
+            setLiveGenStatus({
+              phase: 'idle',
+              latencyS: s.latency_s,
+              seedUsed: variants[0].seed ?? s.seed_used,
+            })
+            return
+          }
+          if (s.status === 'error') {
+            setLiveGenStatus({ phase: 'error', message: s.detail ?? 'Generation failed' })
+            return
+          }
+          if (Date.now() - startedAt > 5000) {
+            setLiveGenStatus({ phase: 'generating', message: 'GPU warming up…' })
+          }
+        } catch {
+          // Transient poll failure — keep polling until timeout.
+        }
+        livePollTimerRef.current = window.setTimeout(() => void poll(), POLL_INTERVAL_MS)
+      }
+      void poll()
+    } catch (error) {
+      if (gen === liveGenerationRef.current) {
+        setLiveGenStatus({
+          phase: 'error',
+          message: error instanceof Error ? error.message : 'Generation failed',
+        })
+      }
+    }
+  }
+
+  async function runEraseGeneration(layerId: string) {
+    const gen = ++liveGenerationRef.current
+    setLiveGenStatus({ phase: 'saving' })
+    try {
+      const saved = await rasterizeAndSaveLayerMask(layerId)
+      if (!saved || gen !== liveGenerationRef.current) {
+        if (gen === liveGenerationRef.current) setLiveGenStatus({ phase: 'idle' })
+        return
+      }
+      await triggerErase(asset.id, { layer_id: layerId })
+      if (gen !== liveGenerationRef.current) return
+      setLiveGenStatus({ phase: 'generating' })
+      const startedAt = Date.now()
+      const poll = async () => {
+        if (gen !== liveGenerationRef.current) return
+        if (Date.now() - startedAt > LIVE_GEN_TIMEOUT_MS) {
+          setLiveGenStatus({ phase: 'error', message: 'Generation timed out' })
+          return
+        }
+        try {
+          const s = await getEraseStatus(asset.id, layerId)
+          if (gen !== liveGenerationRef.current) return
+          if (s.status === 'done' && s.result?.file_path) {
+            const img = new Image()
+            img.onload = () => {
+              if (gen === liveGenerationRef.current) {
+                setLivePreviewIsScribble(false)
+                setLivePreviewImage(img)
+                setLiveGenStatus({ phase: 'idle', latencyS: s.latency_s })
+              }
+            }
+            img.onerror = () => {
+              if (gen === liveGenerationRef.current)
+                setLiveGenStatus({ phase: 'error', message: 'Could not load result image' })
+            }
+            img.src = s.result.file_path
+            return
+          }
+          if (s.status === 'error') {
+            setLiveGenStatus({ phase: 'error', message: s.detail ?? 'Generation failed' })
+            return
+          }
+          if (Date.now() - startedAt > 5000) {
+            setLiveGenStatus({ phase: 'generating', message: 'GPU warming up…' })
+          }
+        } catch {
+          // Transient poll failure — keep polling until the timeout cap.
+        }
+        livePollTimerRef.current = window.setTimeout(() => void poll(), POLL_INTERVAL_MS)
+      }
+      void poll()
+    } catch (error) {
+      if (gen === liveGenerationRef.current) {
+        setLiveGenStatus({
+          phase: 'error',
+          message: error instanceof Error ? error.message : 'Generation failed',
+        })
+      }
     }
   }
 
@@ -538,6 +1073,17 @@ function AnnotatorWorkspace({
           onAnnotatorModeChange={handleAnnotatorModeChange}
           activeMaskLayerId={activeMaskLayerId ?? undefined}
           maskLayers={maskLayers}
+          maskPreviewMode={previewMode}
+          onMaskPreviewModeChange={setPreviewMode}
+          imageDims={imageDims ?? undefined}
+          liveGenEnabled={liveGenEnabled}
+          onLiveGenEnabledChange={setLiveGenEnabled}
+          livePreviewImage={livePreviewImage}
+          livePreviewIsScribble={livePreviewIsScribble}
+          liveGenLatencyS={liveGenStatus.latencyS}
+          liveGenBusy={liveGenStatus.phase === 'saving' || liveGenStatus.phase === 'generating'}
+          onMaskStrokeStarted={invalidateLiveGeneration}
+          onMaskStrokeCommitted={handleMaskStrokeCommitted}
         />
         {annotatorMode === 'mask' && !isVideo && !is3DModel ? (
           <div className="annotator-page__mask-sidebar">
@@ -558,7 +1104,62 @@ function AnnotatorWorkspace({
               <MaskLayerDetailPanel
                 layer={maskLayers.find((l) => l.id === activeMaskLayerId) ?? null}
                 onUpdate={(fields) => handleUpdateMaskLayer(activeMaskLayerId, fields)}
+                onRegenerate={() => handleRegenerateLayer(activeMaskLayerId)}
+                busy={liveGenStatus.phase === 'saving' || liveGenStatus.phase === 'generating'}
+                lastSeed={liveGenStatus.seedUsed}
               />
+            ) : null}
+            {liveVariants.length > 1 ? (
+              <div
+                className="annotator-page__variant-strip"
+                style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}
+              >
+                {liveVariants.map((v, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    title={v.seed != null ? `Variant ${i + 1} — seed ${v.seed}` : `Variant ${i + 1}`}
+                    onClick={() => {
+                      setLiveVariantIndex(i)
+                      setLivePreviewImage(v.img)
+                      setLiveGenStatus((prev) => ({ ...prev, seedUsed: v.seed }))
+                    }}
+                    style={{
+                      padding: 0,
+                      borderRadius: 6,
+                      overflow: 'hidden',
+                      cursor: 'pointer',
+                      background: 'none',
+                      border:
+                        i === liveVariantIndex
+                          ? '2px solid #3b82f6'
+                          : '1px solid rgba(148,163,184,0.25)',
+                    }}
+                  >
+                    <img
+                      src={v.img.src}
+                      alt={`Variant ${i + 1}`}
+                      style={{ width: 56, height: 56, objectFit: 'cover', display: 'block' }}
+                    />
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {liveGenStatus.phase !== 'idle' || liveGenStatus.message ? (
+              <p
+                className="annotator-page__live-gen-status"
+                style={{
+                  fontSize: 12,
+                  margin: '4px 2px 0',
+                  color: liveGenStatus.phase === 'error' ? '#fda4af' : 'rgba(226,232,240,0.7)',
+                }}
+              >
+                {liveGenStatus.phase === 'saving'
+                  ? 'Saving mask…'
+                  : liveGenStatus.phase === 'generating'
+                    ? (liveGenStatus.message ?? 'Generating preview…')
+                    : liveGenStatus.message}
+              </p>
             ) : null}
           </div>
         ) : null}

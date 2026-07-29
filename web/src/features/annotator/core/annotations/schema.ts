@@ -334,7 +334,17 @@ function stableLayerRecord(layer: AnnotationLayer) {
     ...(layer.order !== undefined ? { order: layer.order } : {}),
     ...(layer.mask_op !== undefined ? { mask_op: layer.mask_op } : {}),
     ...(layer.prompt !== undefined ? { prompt: layer.prompt } : {}),
+    ...(layer.negative_prompt !== undefined ? { negative_prompt: layer.negative_prompt } : {}),
     ...(layer.reference !== undefined ? { reference: layer.reference } : {}),
+    ...(layer.gen_mode !== undefined ? { gen_mode: layer.gen_mode } : {}),
+    ...(layer.controlnet_scale !== undefined ? { controlnet_scale: layer.controlnet_scale } : {}),
+    ...(layer.guidance_scale !== undefined ? { guidance_scale: layer.guidance_scale } : {}),
+    ...(layer.num_inference_steps !== undefined ? { num_inference_steps: layer.num_inference_steps } : {}),
+    ...(layer.scribble_scope !== undefined ? { scribble_scope: layer.scribble_scope } : {}),
+    ...(layer.seed !== undefined ? { seed: layer.seed } : {}),
+    ...(layer.num_variants !== undefined ? { num_variants: layer.num_variants } : {}),
+    ...(layer.denoise_strength !== undefined ? { denoise_strength: layer.denoise_strength } : {}),
+    ...(layer.reference_scale !== undefined ? { reference_scale: layer.reference_scale } : {}),
   }
 }
 

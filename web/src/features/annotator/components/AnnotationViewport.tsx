@@ -9,11 +9,15 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
-import { Layers } from 'lucide-react'
+import { Eye, Layers, Sparkles } from 'lucide-react'
 import {
   normalizeBounds,
   vec2Distance,
+  worldToFrameLocal,
 } from '../core/annotations/geometry'
+import { computeMaskBounds } from '../maskBounds'
+import { renderLivePreviewOverlay, renderMaskOpPreview, renderScribblePreviewOverlay, type ScreenRect } from '../maskOpPreview'
+import { resolveNexus8Uri } from '../annotatorApi'
 import {
   FreehandStrokePipeline,
   type FreehandPipelineOptions,
@@ -96,6 +100,17 @@ interface ViewportProps {
   onAnnotatorModeChange: (mode: 'annotate' | 'mask') => void
   activeMaskLayerId?: string
   maskLayers?: AnnotationLayer[]
+  maskPreviewMode?: boolean
+  onMaskPreviewModeChange?: (value: boolean) => void
+  imageDims?: { width: number; height: number }
+  liveGenEnabled?: boolean
+  onLiveGenEnabledChange?: (value: boolean) => void
+  livePreviewImage?: HTMLImageElement | null
+  livePreviewIsScribble?: boolean
+  liveGenLatencyS?: number
+  liveGenBusy?: boolean
+  onMaskStrokeStarted?: () => void
+  onMaskStrokeCommitted?: (layerId: string) => void
 }
 
 function hasBoundsGeometry(geometry: AnnotationGeometry): geometry is Extract<AnnotationGeometry, { start: Vec2; end: Vec2 }> {
@@ -164,6 +179,17 @@ export function AnnotationViewport({
   onAnnotatorModeChange,
   activeMaskLayerId,
   maskLayers,
+  maskPreviewMode = false,
+  onMaskPreviewModeChange,
+  imageDims,
+  liveGenEnabled = false,
+  onLiveGenEnabledChange,
+  livePreviewImage,
+  livePreviewIsScribble = false,
+  liveGenLatencyS,
+  liveGenBusy = false,
+  onMaskStrokeStarted,
+  onMaskStrokeCommitted,
 }: ViewportProps) {
   const surfaceRef = useRef<HTMLDivElement>(null)
   const surfaceHostRef = useRef<HTMLDivElement>(null)
@@ -176,11 +202,9 @@ export function AnnotationViewport({
   const draftRef = useRef<AnnotationEntity | null>(null)
   // Committed vertices of an in-progress polygon (click-to-add); null when idle.
   const polygonPointsRef = useRef<Vec2[] | null>(null)
-  // Brush radius expressed in screen pixels. Divided by the current
-  // screen-pixels-per-frame-unit scale at stroke start so the brush appears
-  // the same size on screen regardless of zoom (finer image-pixel coverage
-  // at high zoom, coarser at low zoom — matches Photoshop's behavior).
-  const BRUSH_SCREEN_RADIUS_PX = 18
+  // brushScreenRadiusPx is the brush radius in screen pixels (see useState below).
+  // Divided by getFrameScale at stroke start so the brush appears the same size
+  // on screen regardless of zoom — matches Photoshop's behavior.
 
   function getFrameScale(frame: AnnotationFrame): number {
     const origin = projectionHost.project(frame, { x: 0, y: 0 }, viewport)
@@ -197,6 +221,8 @@ export function AnnotationViewport({
   const [adapterVersion, setAdapterVersion] = useState(0)
   const [isSurfaceFocused, setIsSurfaceFocused] = useState(false)
   const [isCardMoveGripHovered, setIsCardMoveGripHovered] = useState(false)
+  const [brushScreenRadiusPx, setBrushScreenRadiusPx] = useState(18)
+  const [brushPointerPos, setBrushPointerPos] = useState<{ x: number; y: number } | null>(null)
   const size = useElementSize(surfaceRef)
 
   const viewport = useMemo<ViewportSize>(
@@ -213,6 +239,44 @@ export function AnnotationViewport({
     () => ('getMediaState' in adapter ? (adapter as VideoViewerAdapter) : null),
     [adapter],
   )
+
+  const activeMaskLayer = useMemo(
+    () => (activeMaskLayerId ? maskLayers?.find((layer) => layer.id === activeMaskLayerId) : undefined),
+    [activeMaskLayerId, maskLayers],
+  )
+
+  // Decoded reference images keyed by nexus8:// URI. Resolved lazily when the
+  // active layer's reference changes; the tick re-runs the overlay effect once
+  // a decode lands so the preview appears without a user interaction.
+  const refImageCacheRef = useRef(new Map<string, HTMLImageElement | 'loading' | 'error'>())
+  const [refImageTick, setRefImageTick] = useState(0)
+  const activeReference = activeMaskLayer?.reference
+  useEffect(() => {
+    if (!activeReference || refImageCacheRef.current.has(activeReference)) {
+      return
+    }
+    const cache = refImageCacheRef.current
+    cache.set(activeReference, 'loading')
+    let cancelled = false
+    resolveNexus8Uri(activeReference).then((url) => {
+      if (cancelled || !url) {
+        if (!url) cache.set(activeReference, 'error')
+        return
+      }
+      const image = new Image()
+      image.onload = () => {
+        if (!cancelled) {
+          cache.set(activeReference, image)
+          setRefImageTick((tick) => tick + 1)
+        }
+      }
+      image.onerror = () => cache.set(activeReference, 'error')
+      image.src = url
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeReference])
 
   const visibleAnnotations = useMemo(
     () => {
@@ -516,6 +580,28 @@ export function AnnotationViewport({
           active: showAnnotationsInMaskMode,
           onSelect: () => setShowAnnotationsInMaskMode((v) => !v),
         },
+        {
+          id: 'mask-preview',
+          label: 'Op preview',
+          icon: Eye,
+          active: maskPreviewMode,
+          disabled: !activeMaskLayer?.mask_op,
+          onSelect: () => onMaskPreviewModeChange?.(!maskPreviewMode),
+        },
+        {
+          id: 'live-inpaint',
+          label: liveGenBusy ? 'Live gen (generating…)' : 'Live gen',
+          icon: Sparkles,
+          active: liveGenEnabled,
+          disabled: !(
+            activeMaskLayer?.mask_op === 'remove' ||
+            ((activeMaskLayer?.mask_op === 'inpaint' ||
+              activeMaskLayer?.mask_op === 'scribble' ||
+              activeMaskLayer?.mask_op === 'sketch_inpaint') &&
+              activeMaskLayer?.prompt?.trim())
+          ),
+          onSelect: () => onLiveGenEnabledChange?.(!liveGenEnabled),
+        },
       ] : [],
     }
 
@@ -527,14 +613,20 @@ export function AnnotationViewport({
       { id: 'viewer', items: contextItems },
     ]
   }, [
+    activeMaskLayer,
     activeTool,
     adapter,
     annotatorMode,
     canRedo,
     canUndo,
     isParametersPanelOpen,
+    liveGenBusy,
+    liveGenEnabled,
+    maskPreviewMode,
     onAnnotatorModeChange,
     onDeleteSelected,
+    onLiveGenEnabledChange,
+    onMaskPreviewModeChange,
     onRedo,
     onToolChange,
     onUndo,
@@ -739,7 +831,89 @@ export function AnnotationViewport({
     })
 
     renderPrimitiveBatchesToCanvas(context, plan.batches)
-  }, [adapter, adapterVersion, dragPreview, draft, inlineEditorId, isInlineEditorOpen, isViewerReady, participants, projectionHost, selectedId, viewport, visibleAnnotations])
+
+    // Second pass: operation preview + live AI overlay for the active mask layer.
+    // Composited above stroke primitives; never touches the annotation list.
+    if (annotatorMode === 'mask' && activeMaskLayer && imageDims) {
+      const maskShapes = visibleAnnotations.filter(
+        (annotation) => annotation.maskRegion && annotation.layerId === activeMaskLayer.id,
+      )
+      const bounds = computeMaskBounds(maskShapes)
+      if (bounds) {
+        const projectRect = (x: number, y: number, w: number, h: number): ScreenRect | null => {
+          const z = bounds.frame.origin.z
+          const tl = projectionHost.project(bounds.frame, worldToFrameLocal(bounds.frame, { x, y, z }), viewport)
+          const br = projectionHost.project(
+            bounds.frame,
+            worldToFrameLocal(bounds.frame, { x: x + w, y: y + h, z }),
+            viewport,
+          )
+          if (!tl || !br) {
+            return null
+          }
+          return {
+            x: Math.min(tl.x, br.x),
+            y: Math.min(tl.y, br.y),
+            w: Math.abs(br.x - tl.x),
+            h: Math.abs(br.y - tl.y),
+          }
+        }
+        if (maskPreviewMode && activeMaskLayer.mask_op) {
+          void refImageTick
+          const cached = activeMaskLayer.reference
+            ? refImageCacheRef.current.get(activeMaskLayer.reference)
+            : undefined
+          renderMaskOpPreview(context, {
+            layer: activeMaskLayer,
+            bounds,
+            imageDims,
+            referenceImage: cached instanceof HTMLImageElement ? cached : null,
+            projectRect,
+          })
+        }
+        if (livePreviewImage) {
+          const imageRect = projectRect(0, 0, imageDims.width, imageDims.height)
+          if (imageRect) {
+            if (livePreviewIsScribble) {
+              renderScribblePreviewOverlay(
+                context,
+                livePreviewImage,
+                imageRect,
+                liveGenLatencyS != null ? `${liveGenLatencyS.toFixed(1)}s` : '',
+              )
+            } else {
+              const bbox = projectRect(bounds.x, bounds.y, bounds.w, bounds.h)
+              if (bbox) {
+                renderLivePreviewOverlay(
+                  context,
+                  livePreviewImage,
+                  imageRect,
+                  bbox,
+                  liveGenLatencyS != null ? `${liveGenLatencyS.toFixed(1)}s` : '',
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Brush cursor ring — drawn last so it always appears on top.
+    if (activeTool === 'brush' && brushPointerPos && !draft) {
+      context.save()
+      context.beginPath()
+      context.arc(brushPointerPos.x, brushPointerPos.y, brushScreenRadiusPx, 0, Math.PI * 2)
+      context.strokeStyle = 'rgba(255,255,255,0.9)'
+      context.lineWidth = 1.5
+      context.stroke()
+      context.beginPath()
+      context.arc(brushPointerPos.x, brushPointerPos.y, brushScreenRadiusPx, 0, Math.PI * 2)
+      context.strokeStyle = 'rgba(0,0,0,0.5)'
+      context.lineWidth = 0.75
+      context.stroke()
+      context.restore()
+    }
+  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, maskPreviewMode, participants, projectionHost, refImageTick, selectedId, viewport, visibleAnnotations])
 
   function pointerToLocal(event: { clientX: number; clientY: number }) {
     const canvas = overlayCanvasRef.current
@@ -817,7 +991,7 @@ export function AnnotationViewport({
         geometry: {
           kind: 'brush',
           points: initialPoints.length > 0 ? initialPoints : [{ x: 0, y: 0 }],
-          radius: BRUSH_SCREEN_RADIUS_PX / getFrameScale(frame),
+          radius: brushScreenRadiusPx / getFrameScale(frame),
         },
         style: {
           stroke: authorColor,
@@ -905,6 +1079,11 @@ export function AnnotationViewport({
 
     room.store.upsertAnnotation(annotation)
     onSelect(annotation.id)
+    // Single hook for the live-generation loop: covers brush pointer-up and
+    // polygon double-click/Enter commits alike.
+    if (annotation.maskRegion) {
+      onMaskStrokeCommitted?.(annotation.layerId)
+    }
   }
 
   function dedupePolygonPoints(points: Vec2[]) {
@@ -950,6 +1129,15 @@ export function AnnotationViewport({
         cancelPolygon()
       }
     }
+    if (activeTool === 'brush' && annotatorMode === 'mask') {
+      if (event.key === '[') {
+        event.preventDefault()
+        setBrushScreenRadiusPx((r) => Math.max(1, r - 4))
+      } else if (event.key === ']') {
+        event.preventDefault()
+        setBrushScreenRadiusPx((r) => Math.min(100, r + 4))
+      }
+    }
   }
 
   function handlePointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
@@ -986,6 +1174,11 @@ export function AnnotationViewport({
     }
 
     room.setLocalCursor(adapter.id, screenPoint, activeTool)
+
+    // Editing has resumed — invalidate any stale live-inpaint overlay immediately.
+    if (annotatorMode === 'mask' && (activeTool === 'brush' || activeTool === 'polygon')) {
+      onMaskStrokeStarted?.()
+    }
 
     if (activeTool === 'select') {
       const hit = findHitAnnotation(screenPoint)
@@ -1119,6 +1312,7 @@ export function AnnotationViewport({
 
     const nextDraft = beginDraft(activeTool, screenPoint, event.nativeEvent.timeStamp)
     if (nextDraft) {
+      setBrushPointerPos(null)
       setDraft(nextDraft)
     }
   }
@@ -1178,6 +1372,10 @@ export function AnnotationViewport({
     }
 
     room.setLocalCursor(adapter.id, screenPoint, activeTool)
+
+    if (activeTool === 'brush' && !draft) {
+      setBrushPointerPos(screenPoint)
+    }
 
     if (!draft) {
       return
@@ -1338,6 +1536,9 @@ export function AnnotationViewport({
     if (isCardMoveGripHovered) {
       setIsCardMoveGripHovered(false)
     }
+    if (brushPointerPos) {
+      setBrushPointerPos(null)
+    }
     room.clearLocalCursor()
   }
 
@@ -1372,6 +1573,24 @@ export function AnnotationViewport({
         </div>
       </header>
       <ViewerToolbar groups={viewerToolbarGroups} />
+      {annotatorMode === 'mask' && activeTool === 'brush' && (
+        <div className="viewer-brush-options">
+          <label className="viewer-brush-options__label">
+            Size
+            <span className="viewer-brush-options__value">{brushScreenRadiusPx * 2}</span>
+          </label>
+          <input
+            type="range"
+            min={1}
+            max={100}
+            step={2}
+            value={brushScreenRadiusPx}
+            onChange={(e) => setBrushScreenRadiusPx(parseInt(e.target.value, 10))}
+            className="viewer-brush-options__slider"
+          />
+          <span className="viewer-brush-options__hint">[ / ] keys to adjust</span>
+        </div>
+      )}
       <div
         className={isSurfaceFocused ? 'viewer-surface viewer-surface--focused' : 'viewer-surface'}
         ref={surfaceRef}
@@ -1540,6 +1759,7 @@ export function AnnotationViewport({
           className={isCardMoveGripHovered
             ? 'viewer-canvas viewer-canvas--overlay viewer-canvas--overlay-card-move'
             : 'viewer-canvas viewer-canvas--overlay'}
+          style={activeTool === 'brush' && annotatorMode === 'mask' ? { cursor: 'none' } : undefined}
           onContextMenu={(event) => event.preventDefault()}
           onDoubleClick={handleDoubleClick}
           onPointerDown={handlePointerDown}

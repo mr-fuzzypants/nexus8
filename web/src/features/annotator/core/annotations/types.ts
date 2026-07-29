@@ -128,7 +128,10 @@ export interface AnnotationEntity {
   version: number
 }
 
-export type MaskOp = 'inpaint' | 'outpaint' | 'background_replace' | 'remove' | 'segment'
+export type MaskOp = 'inpaint' | 'outpaint' | 'background_replace' | 'remove' | 'segment' | 'scribble' | 'sketch_inpaint'
+/** Generation quality tradeoff: fast = LCM (~2s, harmonize/remove only — barely
+ *  follows prompts); quality = full CFG (~4-5s, needed for prompted content). */
+export type GenMode = 'fast' | 'quality'
 
 export interface AnnotationLayer {
   id: string
@@ -143,8 +146,33 @@ export interface AnnotationLayer {
   mask_op?: MaskOp
   /** Natural language prompt for generative AI operations. */
   prompt?: string
-  /** Reference asset URI (nexus8://asset/{code}). */
+  /** Reference asset URI (nexus8://{code} or nexus8://{code}/{ref}, e.g. nexus8://ABC123/latest). */
   reference?: string
+  /** Live-generation quality mode; defaults to 'quality' when a prompt is set. */
+  gen_mode?: GenMode
+  /** ControlNet conditioning strength for scribble/sketch-inpaint (0.3–1.0, default 0.7). */
+  controlnet_scale?: number
+  /** CFG guidance scale. Scribble: 0–3 (default 1.0); sketch inpaint: 1–15 (default 7.5). */
+  guidance_scale?: number
+  /** Number of diffusion steps for sketch inpaint (10–50, default 20). More steps = higher quality, slower. */
+  num_inference_steps?: number
+  /** Negative prompt for sketch inpaint — describe what to avoid in the generation. */
+  negative_prompt?: string
+  /** Whether scribble generation replaces the full image or only the sketched region. */
+  scribble_scope?: 'full' | 'region'
+  /** Fixed RNG seed for reproducible generation. Omit for a random result each time. */
+  seed?: number
+  /** Scribble + sketch inpaint: images generated per run in one GPU batch (1–4,
+   *  default 1). Variant i uses seed base+i, so each is individually reproducible. */
+  num_variants?: number
+  /** Sketch inpaint denoise strength (0.3–1.0, default 1.0). 1.0 = regenerate the
+   *  masked region from noise; lower keeps the original pixels' structure. Effective
+   *  steps = num_inference_steps × strength, so raise steps when lowering this. */
+  denoise_strength?: number
+  /** Sketch inpaint: IP-Adapter influence of the reference image (0–1, default 0.5).
+   *  Only meaningful when `reference` resolves to an image; higher values can
+   *  override the text prompt. */
+  reference_scale?: number
 }
 
 export interface AnnotationDocumentSnapshot {
