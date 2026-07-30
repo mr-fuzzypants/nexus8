@@ -302,7 +302,8 @@ def ingest_file(uploaded_file, *, name=None, created_by=None):
     return asset, True
 
 
-def add_version(asset, uploaded_file, *, created_by=None):
+def add_version(asset, uploaded_file, *, created_by=None, version_number=None,
+                variation=0, extra_data=None, upstream=None):
     """
     Publish a new version of an existing asset from an uploaded file.
 
@@ -310,6 +311,11 @@ def add_version(asset, uploaded_file, *, created_by=None):
     asset, that version is returned with created=False. The asset's live
     type_data is repointed at the new file so grids show the latest rendition,
     and AI analysis is re-queued.
+
+    version_number/variation place the version on the two-axis grid (a
+    generation run's parallel candidates); extra_data is merged into the
+    version payload (e.g. a ``generation`` provenance record); upstream is
+    passed through to publish() as {role: Version} lineage edges.
     """
     original_bytes = uploaded_file.read()
     content_hash = hashlib.sha256(original_bytes).hexdigest()
@@ -324,9 +330,13 @@ def add_version(asset, uploaded_file, *, created_by=None):
             "file_path": stored["file_path"],
             "thumbnails": stored["thumbnails"],
             "technical_metadata": stored["technical_metadata"],
+            **(extra_data or {}),
         },
         content_hash=content_hash,
         created_by=created_by,
+        version_number=version_number,
+        variation=variation,
+        upstream=upstream,
     )
 
     asset.type_data.update(

@@ -119,17 +119,31 @@ export async function resolveNexus8Uri(uri: string): Promise<string | null> {
   }
 }
 
+/** One stored render: variation M of run N on the layer's render asset
+ *  (versions × variations model — LAYER_RENDER_SCHEMA.md). Legacy responses
+ *  return an AssetSummary instead; both carry file_path. */
+export interface RenderResult {
+  asset_id?: number
+  file_path?: string | null
+  thumbnails?: Record<string, string> | null
+  version_number?: number
+  variation_number?: number
+  seed?: number
+}
+
 export interface InpaintStatus {
   status: 'working' | 'done' | 'error'
-  result?: AssetSummary
+  result?: (AssetSummary | RenderResult) & { seed?: number }
   dispatched_at?: string
   result_at?: string
   latency_s?: number
   detail?: string
   /** The seed the backend actually used — server-generated when the client sent none. */
   seed_used?: number
+  /** The run number these results were stored under (version_number on the render asset). */
+  run?: number
   /** All batch variants (one entry per generated image), each with its own seed. */
-  results?: (AssetSummary & { seed?: number })[]
+  results?: ((AssetSummary | RenderResult) & { seed?: number })[]
 }
 
 /** Dispatch a live inpaint generation for a layer's saved mask. */
@@ -137,6 +151,8 @@ export async function triggerInpaint(
   assetId: number,
   body: {
     layer_id: string
+    /** Layer's vector strokes, recorded in the run's generation record for History restore. */
+    mask_shapes?: unknown[]
     prompt?: string
     num_inference_steps?: number
     mode?: 'fast' | 'quality'
@@ -166,6 +182,8 @@ export async function triggerScribble(
   assetId: number,
   body: {
     layer_id: string
+    /** Layer's vector strokes, recorded in the run's generation record for History restore. */
+    mask_shapes?: unknown[]
     prompt?: string
     controlnet_scale?: number
     guidance_scale?: number
@@ -239,7 +257,7 @@ export async function getScribbleStatus(
 /** Dispatch a BigLaMa erase for a layer's saved mask. */
 export async function triggerErase(
   assetId: number,
-  body: { layer_id: string },
+  body: { layer_id: string; mask_shapes?: unknown[] },
 ): Promise<{ call_id: string }> {
   const { data } = await http.post<{ call_id: string }>(
     `/trackables/api/library/assets/${assetId}/erase/`,
@@ -253,6 +271,8 @@ export async function triggerSketchInpaint(
   assetId: number,
   body: {
     layer_id: string
+    /** Layer's vector strokes, recorded in the run's generation record for History restore. */
+    mask_shapes?: unknown[]
     prompt?: string
     negative_prompt?: string
     controlnet_scale?: number
@@ -294,6 +314,44 @@ export async function getEraseStatus(
     `/trackables/api/library/assets/${assetId}/erase/status/`,
     { params: { layer_id: layerId } },
   )
+  return data
+}
+
+/** The layer's contact sheet: runs (rows) × variations (columns), newest run first. */
+export interface RenderGrid {
+  asset: AssetSummary | null
+  selected: { version_number: number; variation_number: number } | null
+  runs: {
+    run: number
+    results: (RenderResult & { generation?: Record<string, unknown>; created_at?: string })[]
+  }[]
+}
+
+/** Fetch all stored renders for a layer. */
+export async function getRenderGrid(assetId: number, layerId: string): Promise<RenderGrid> {
+  const { data } = await http.get<RenderGrid>(
+    `/trackables/api/library/assets/${assetId}/renders/`,
+    { params: { layer_id: layerId } },
+  )
+  return data
+}
+
+/** Pin the artist's chosen render (the 'selected' symlink, audited server-side). */
+export async function selectRender(
+  assetId: number,
+  layerId: string,
+  versionNumber: number,
+  variationNumber = 0,
+): Promise<{ status: string; version_number: number; variation_number: number }> {
+  const { data } = await http.post<{
+    status: string
+    version_number: number
+    variation_number: number
+  }>(`/trackables/api/library/assets/${assetId}/renders/select/`, {
+    layer_id: layerId,
+    version_number: versionNumber,
+    variation_number: variationNumber,
+  })
   return data
 }
 

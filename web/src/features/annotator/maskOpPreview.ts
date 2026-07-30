@@ -196,6 +196,7 @@ export function renderLivePreviewOverlay(
   imageScreenRect: ScreenRect,
   bboxScreenRect: ScreenRect,
   latencyLabel: string,
+  drawBorder = true,
 ): void {
   ctx.save()
   ctx.beginPath()
@@ -205,11 +206,15 @@ export function renderLivePreviewOverlay(
   // (a regenerated-but-similar region reads as "nothing changed").
   ctx.drawImage(img, imageScreenRect.x, imageScreenRect.y, imageScreenRect.w, imageScreenRect.h)
   ctx.restore()
-  ctx.save()
-  ctx.strokeStyle = 'rgba(94, 234, 212, 0.9)'
-  ctx.lineWidth = 1
-  ctx.strokeRect(bboxScreenRect.x, bboxScreenRect.y, bboxScreenRect.w, bboxScreenRect.h)
-  ctx.restore()
+  // While a new generation is in flight the animated busy border owns this
+  // rect, so the caller suppresses the solid one.
+  if (drawBorder) {
+    ctx.save()
+    ctx.strokeStyle = 'rgba(94, 234, 212, 0.9)'
+    ctx.lineWidth = 1
+    ctx.strokeRect(bboxScreenRect.x, bboxScreenRect.y, bboxScreenRect.w, bboxScreenRect.h)
+    ctx.restore()
+  }
 
   const label = latencyLabel ? `AI preview · ${latencyLabel}` : 'AI preview'
   ctx.save()
@@ -239,6 +244,7 @@ export function renderScribblePreviewOverlay(
   img: HTMLImageElement,
   imageScreenRect: ScreenRect,
   latencyLabel: string,
+  drawBorder = true,
 ): void {
   ctx.save()
   ctx.beginPath()
@@ -246,11 +252,13 @@ export function renderScribblePreviewOverlay(
   ctx.clip()
   ctx.drawImage(img, imageScreenRect.x, imageScreenRect.y, imageScreenRect.w, imageScreenRect.h)
   ctx.restore()
-  ctx.save()
-  ctx.strokeStyle = 'rgba(94, 234, 212, 0.9)'
-  ctx.lineWidth = 1
-  ctx.strokeRect(imageScreenRect.x, imageScreenRect.y, imageScreenRect.w, imageScreenRect.h)
-  ctx.restore()
+  if (drawBorder) {
+    ctx.save()
+    ctx.strokeStyle = 'rgba(94, 234, 212, 0.9)'
+    ctx.lineWidth = 1
+    ctx.strokeRect(imageScreenRect.x, imageScreenRect.y, imageScreenRect.w, imageScreenRect.h)
+    ctx.restore()
+  }
 
   const label = latencyLabel ? `Scribble preview · ${latencyLabel}` : 'Scribble preview'
   ctx.save()

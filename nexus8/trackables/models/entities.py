@@ -98,8 +98,16 @@ class VersionedEntity(Trackable):
     class Meta:
         verbose_name_plural = "versioned entities"
         constraints = [
+            # The 'entity' clause tolerates 5 legacy default-typed rows with
+            # parents (pre-dating the container/asset split). This matches the
+            # constraint the DB has enforced since migration 0004 — keeping the
+            # model narrower caused makemigrations to repeatedly regenerate a
+            # restatement that fails against that dev data (see the 0006/0007
+            # migration headers, and the deleted 0015).
             models.CheckConstraint(
-                condition=Q(entity_type="container") | Q(parent_container__isnull=True),
+                condition=Q(entity_type="container")
+                | Q(entity_type="entity")
+                | Q(parent_container__isnull=True),
                 name="parent_only_on_containers",
             ),
         ]
@@ -234,7 +242,7 @@ class VersionedEntity(Trackable):
         return self.symlinks.select_related("version").get(name=name).version
 
     def publish(self, data=None, *, symlinks=("latest",), upstream=None,
-                content_hash="", created_by=None):
+                content_hash="", created_by=None, version_number=None, variation=0):
         """
         The blessed way to create a version: allocates the version number
         under the entity lock, validates the payload against the type's
@@ -247,6 +255,11 @@ class VersionedEntity(Trackable):
                       {"generated_from_batch": batch_version}
             content_hash: hash of the published content, for verification/dedup
             created_by: User who published
+            version_number: reuse an existing run number instead of allocating
+                the next one — for parallel variations of a single generation
+                run. Requires a distinct ``variation`` per call.
+            variation: variation number under ``version_number`` (default 0,
+                the plain linear-history case)
 
         Returns the created Version.
         """
@@ -258,9 +271,17 @@ class VersionedEntity(Trackable):
             validator(payload)
 
         with transaction.atomic():
+            if version_number is None:
+                version_number = _next_version_number(self)
+            else:
+                # Same serialization as _next_version_number: concurrent
+                # publishers of sibling variations must not collide on the
+                # (entity, version_number, variation_number) constraint.
+                type(self).objects.select_for_update().get(pk=self.pk)
             version = Version.objects.create(
                 entity=self,
-                version_number=_next_version_number(self),
+                version_number=version_number,
+                variation_number=variation,
                 data=payload,
                 content_hash=content_hash,
                 created_by=created_by,

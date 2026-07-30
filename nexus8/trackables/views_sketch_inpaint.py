@@ -6,28 +6,38 @@ Sketch-guided inpaint dispatch/poll endpoints.
 
 Modal app: nexus8-sketch-inpaint (modal_functions/sketch_inpaint.py).
 Sends the source image + scribble map + mask bounding box to Modal.
-Result is stored as a linked MediaAsset with role "sketch_inpaint_preview".
+
+Results land on the layer's render asset as one *run* of parallel variations
+(versions × variations model — see LAYER_RENDER_SCHEMA.md): each dispatch
+allocates the next version_number, each returned PNG becomes vRun.i with its
+own immutable ``generation`` record and lineage links to the exact source and
+guide versions sent to Modal. The mask relation's ``type_data`` carries only
+transient dispatch coordination state (call id, pending params).
 """
 
 import logging
 import random
 
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import EntityRelation, MediaAsset
-from .services.ingest import add_version, ingest_file
-from .views_inpaint import _mask_lookup, _reference_bytes, _version_file_bytes
+from .models import MediaAsset
+from .models.versions import Version
+from .services import layer_renders
+from .views_inpaint import _file_ref, _mask_lookup, _media_bytes, _reference_bytes
 from .views_library import asset_summary
 
 logger = logging.getLogger(__name__)
 
-ROLE = "sketch_inpaint_preview"
 MODAL_APP_NAME = "nexus8-sketch-inpaint"
+GUIDE_ROLE = "sketch_guide"
+
+
+def _latest_version(entity):
+    return entity.versions.order_by("-version_number", "-variation_number").first()
 
 
 class SketchInpaintTriggerView(APIView):
@@ -53,14 +63,18 @@ class SketchInpaintTriggerView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        scribble_bytes = _version_file_bytes(mask_asset)
+        # Resolve the exact versions whose bytes go to Modal, so the stored
+        # renders can pin them as lineage (init_image / sketch_guide).
+        guide_version = _latest_version(mask_asset)
+        scribble_bytes = _media_bytes(_file_ref(guide_version)) if guide_version else None
         if not scribble_bytes:
             return Response(
                 {"detail": "Could not load sketch bytes."},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
-        source_bytes = _version_file_bytes(source)
+        source_version = _latest_version(source)
+        source_bytes = _media_bytes(_file_ref(source_version)) if source_version else None
         if not source_bytes:
             return Response(
                 {"detail": "Could not load source image bytes."},
@@ -97,13 +111,14 @@ class SketchInpaintTriggerView(APIView):
         seed = int(seed_raw) if seed_raw is not None else random.randint(0, 2**31 - 1)
         num_variants_raw = request.data.get("num_variants")
         num_variants = max(1, min(4, int(num_variants_raw))) if num_variants_raw is not None else 1
+        negative_prompt = str(request.data.get("negative_prompt") or "")
 
         import modal
 
         try:
             inpainter = modal.Cls.from_name(MODAL_APP_NAME, "SketchInpainter")()
             spawn_kwargs = dict(
-                negative_prompt=str(request.data.get("negative_prompt") or ""),
+                negative_prompt=negative_prompt,
                 controlnet_scale=controlnet_scale,
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_inference_steps,
@@ -128,6 +143,27 @@ class SketchInpaintTriggerView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        # The run's parameter record, held here until the poll stores it into
+        # each variation's Version.data — written once, never overwritten.
+        params = {
+            "prompt": str(prompt),
+            "negative_prompt": negative_prompt,
+            "controlnet_scale": controlnet_scale,
+            "guidance_scale": guidance_scale,
+            "num_inference_steps": num_inference_steps,
+            "denoise_strength": denoise_strength,
+            "mask_dims": mask_dims,
+            "num_variants": num_variants,
+        }
+        if reference_uri:
+            params["reference"] = str(reference_uri)
+            params["reference_scale"] = reference_scale
+        mask_shapes = request.data.get("mask_shapes")
+        if isinstance(mask_shapes, list) and mask_shapes:
+            # The layer's vector strokes at dispatch — lets History restore the
+            # exact input mask as editable shapes (stored once per run).
+            params["mask_shapes"] = mask_shapes
+
         relation.refresh_from_db()
         for key in list(relation.type_data):
             if key.startswith("sketch_inpaint_result"):
@@ -138,6 +174,9 @@ class SketchInpaintTriggerView(APIView):
                 "sketch_inpaint_dispatched_at": timezone.now().isoformat(),
                 "sketch_inpaint_status": "working",
                 "sketch_inpaint_seed": seed,
+                "sketch_inpaint_params": params,
+                "sketch_inpaint_source_version_id": source_version.pk,
+                "sketch_inpaint_guide_version_id": guide_version.pk,
             }
         )
         relation.save(update_fields=["type_data", "updated_at"])
@@ -195,19 +234,7 @@ class SketchInpaintStatusView(APIView):
         # Batched Modal function returns a list of PNGs (one per variant);
         # tolerate plain bytes from calls dispatched before the batch change.
         png_list = png_bytes if isinstance(png_bytes, list) else [png_bytes]
-        base_seed = relation.type_data.get("sketch_inpaint_seed")
-        stored = []
-        for index, png in enumerate(png_list):
-            result_asset = self._store_result(request, source, layer_id, png, index)
-            stored.append(
-                {
-                    "asset_id": result_asset.id,
-                    # Mirrors Modal's per-variant seed rule (base seed + index).
-                    "seed": base_seed + index if isinstance(base_seed, int) else None,
-                }
-            )
 
-        relation.refresh_from_db()
         dispatched_at = relation.type_data.get("sketch_inpaint_dispatched_at")
         result_at = timezone.now()
         latency_s = None
@@ -220,12 +247,43 @@ class SketchInpaintStatusView(APIView):
             except ValueError:
                 pass
 
+        base_seed = relation.type_data.get("sketch_inpaint_seed")
+        params = dict(relation.type_data.get("sketch_inpaint_params") or {})
+        params["modal_call_id"] = call_id
+        params["latency_s"] = latency_s
+
+        render_asset, run, versions = layer_renders.store_run_results(
+            source,
+            layer_id,
+            png_list,
+            op="sketch_inpaint",
+            params=params,
+            base_seed=base_seed if isinstance(base_seed, int) else None,
+            source_version=Version.objects.filter(
+                pk=relation.type_data.get("sketch_inpaint_source_version_id")
+            ).first(),
+            guide_version=Version.objects.filter(
+                pk=relation.type_data.get("sketch_inpaint_guide_version_id")
+            ).first(),
+            guide_role=GUIDE_ROLE,
+            created_by=request.user if request.user.is_authenticated else None,
+        )
+
+        relation.refresh_from_db()
         relation.type_data.update(
             {
                 "sketch_inpaint_status": "done",
                 "sketch_inpaint_result_at": result_at.isoformat(),
-                "sketch_inpaint_result_asset_id": stored[0]["asset_id"],
-                "sketch_inpaint_results": stored,
+                "sketch_inpaint_run": run,
+                "sketch_inpaint_results": [
+                    {
+                        "version_id": v.pk,
+                        "version_number": v.version_number,
+                        "variation_number": v.variation_number,
+                        "seed": v.data.get("generation", {}).get("seed"),
+                    }
+                    for v in versions
+                ],
                 "sketch_inpaint_latency_s": latency_s,
             }
         )
@@ -234,78 +292,47 @@ class SketchInpaintStatusView(APIView):
 
     @staticmethod
     def _done_payload(relation):
-        """Build the done response from stored per-variant results.
+        """Build the done response from stored per-variation results.
 
-        Returns None when the recorded result assets no longer exist, so the
-        caller can fall through and re-poll the Modal call instead.
+        Returns None when the recorded versions no longer exist, so the caller
+        can fall through and re-poll the Modal call instead. Entries keep the
+        pre-existing shape the SPA consumes (file_path, seed) with the grid
+        coordinates added.
         """
         stored = relation.type_data.get("sketch_inpaint_results") or []
-        if not stored:
-            legacy_id = relation.type_data.get("sketch_inpaint_result_asset_id")
-            if legacy_id:
-                stored = [{"asset_id": legacy_id, "seed": relation.type_data.get("sketch_inpaint_seed")}]
         results = []
         for entry in stored:
-            asset = MediaAsset.objects.filter(pk=entry.get("asset_id")).first()
-            if asset is not None:
-                results.append({**asset_summary(asset), "seed": entry.get("seed")})
+            if "version_id" in entry:
+                version = (
+                    Version.objects.filter(pk=entry["version_id"])
+                    .select_related("entity")
+                    .first()
+                )
+                if version is not None:
+                    results.append(
+                        {
+                            "asset_id": version.entity_id,
+                            "file_path": version.data.get("file_path"),
+                            "thumbnails": version.data.get("thumbnails"),
+                            "version_number": version.version_number,
+                            "variation_number": version.variation_number,
+                            "seed": entry.get("seed"),
+                        }
+                    )
+            else:
+                # Legacy per-variant-slot record (pre versions × variations).
+                asset = MediaAsset.objects.filter(pk=entry.get("asset_id")).first()
+                if asset is not None:
+                    results.append({**asset_summary(asset), "seed": entry.get("seed")})
         if not results:
             return None
         return {
             "status": "done",
             "result": results[0],
             "results": results,
+            "run": relation.type_data.get("sketch_inpaint_run"),
             "dispatched_at": relation.type_data.get("sketch_inpaint_dispatched_at"),
             "result_at": relation.type_data.get("sketch_inpaint_result_at"),
             "latency_s": relation.type_data.get("sketch_inpaint_latency_s"),
             "seed_used": results[0].get("seed"),
         }
-
-    @staticmethod
-    def _store_result(request, source, layer_id, png_bytes, variant=0):
-        uploaded = SimpleUploadedFile(
-            f"{source.name}-sketch-inpaint-{layer_id}-v{variant}.png",
-            png_bytes,
-            content_type="image/png",
-        )
-        user = request.user if request.user.is_authenticated else None
-        existing = MediaAsset.objects.filter(
-            type_data__sketch_inpaint_preview_of_asset_id=source.id,
-            type_data__sketch_inpaint_preview_layer_id=layer_id,
-            type_data__sketch_inpaint_preview_variant=variant,
-        ).first()
-        if existing is not None:
-            result_version, _ = add_version(existing, uploaded, created_by=user)
-            result_asset = existing
-        else:
-            result_asset, _ = ingest_file(
-                uploaded, name=f"{source.name} sketch inpaint preview v{variant}", created_by=user
-            )
-            result_version = result_asset.versions.order_by("-version_number").first()
-
-        result_asset.type_data.update(
-            {
-                "sketch_inpaint_preview_of_asset_id": source.id,
-                "sketch_inpaint_preview_layer_id": layer_id,
-                "sketch_inpaint_preview_variant": variant,
-                "asset_functional_type": "sketch_inpaint_preview",
-            }
-        )
-        result_asset.save(update_fields=["type_data", "updated_at"])
-
-        EntityRelation.objects.update_or_create(
-            asset=source,
-            entity=result_asset,
-            role=ROLE,
-            defaults={
-                "source": "ai",
-                "confidence": 1.0,
-                "entity_version": result_version,
-                "entity_version_number": result_version.version_number if result_version else None,
-                "type_data": {
-                    "sketch_inpaint_preview_layer_id": layer_id,
-                    "sketch_inpaint_preview_variant": variant,
-                },
-            },
-        )
-        return result_asset

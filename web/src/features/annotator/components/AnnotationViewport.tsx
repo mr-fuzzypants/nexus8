@@ -106,6 +106,10 @@ interface ViewportProps {
   liveGenEnabled?: boolean
   onLiveGenEnabledChange?: (value: boolean) => void
   livePreviewImage?: HTMLImageElement | null
+  /** When previewing a stored render from History: that run's own mask_dims
+   *  (image-pixel coords). The overlay border/clip uses this instead of the
+   *  layer's current strokes, which may have changed since the run. */
+  livePreviewRegion?: { x: number; y: number; w: number; h: number } | null
   livePreviewIsScribble?: boolean
   liveGenLatencyS?: number
   liveGenBusy?: boolean
@@ -185,6 +189,7 @@ export function AnnotationViewport({
   liveGenEnabled = false,
   onLiveGenEnabledChange,
   livePreviewImage,
+  livePreviewRegion = null,
   livePreviewIsScribble = false,
   liveGenLatencyS,
   liveGenBusy = false,
@@ -195,6 +200,11 @@ export function AnnotationViewport({
   const surfaceHostRef = useRef<HTMLDivElement>(null)
   const backgroundCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
+  // Dedicated layer for the generation-in-progress marching-ants border: the
+  // main overlay only redraws on state changes, so the animation gets its own
+  // canvas + rAF loop instead of forcing full scene redraws every frame.
+  const genBusyCanvasRef = useRef<HTMLCanvasElement>(null)
+  const genBusyRectRef = useRef<ScreenRect | null>(null)
   const surfaceControllerRef = useRef<ViewerSurfaceController | null>(null)
   const navigationRef = useRef<{ pointerId: number; lastPoint: Vec2 } | null>(null)
   const cardDragRef = useRef<CardDragState | null>(null)
@@ -740,11 +750,10 @@ export function AnnotationViewport({
       return
     }
 
+    // No focus gate: zoom (wheel / trackpad pinch) engages the moment the
+    // cursor is over the surface, like the first brush press — requiring a
+    // priming click here made pinch feel dead after picking a tool.
     const handleNativeWheel = (event: WheelEvent) => {
-      if (!isSurfaceFocused) {
-        return
-      }
-
       const bounds = surface.getBoundingClientRect()
       const screenPoint = {
         x: event.clientX - bounds.left,
@@ -769,7 +778,7 @@ export function AnnotationViewport({
     return () => {
       surface.removeEventListener('wheel', handleNativeWheel)
     }
-  }, [adapter, isSurfaceFocused, viewport])
+  }, [adapter, viewport])
 
   useEffect(() => {
     const canvas = backgroundCanvasRef.current
@@ -809,6 +818,9 @@ export function AnnotationViewport({
     canvas.style.height = `${viewport.height}px`
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
     context.clearRect(0, 0, viewport.width, viewport.height)
+    // Recomputed below when a generation is in flight; nulled first so stale
+    // rects never survive a mode/layer switch.
+    genBusyRectRef.current = null
     // Hold markers off until the surface is drawable — before a 3D model loads
     // and frames the camera, anchors would project against an unsettled view.
     if (!isViewerReady) {
@@ -858,6 +870,15 @@ export function AnnotationViewport({
             h: Math.abs(br.y - tl.y),
           }
         }
+        if (liveGenBusy) {
+          // Scribble regenerates the full frame; every other op is bounded by
+          // the mask strokes. The rAF loop reads this rect each frame.
+          const busyRegion =
+            activeMaskLayer.mask_op === 'scribble'
+              ? { x: 0, y: 0, w: imageDims.width, h: imageDims.height }
+              : bounds
+          genBusyRectRef.current = projectRect(busyRegion.x, busyRegion.y, busyRegion.w, busyRegion.h)
+        }
         if (maskPreviewMode && activeMaskLayer.mask_op) {
           void refImageTick
           const cached = activeMaskLayer.reference
@@ -880,9 +901,13 @@ export function AnnotationViewport({
                 livePreviewImage,
                 imageRect,
                 liveGenLatencyS != null ? `${liveGenLatencyS.toFixed(1)}s` : '',
+                !liveGenBusy,
               )
             } else {
-              const bbox = projectRect(bounds.x, bounds.y, bounds.w, bounds.h)
+              // History previews carry the run's own region; live results
+              // fall back to the current strokes' bounds.
+              const region = livePreviewRegion ?? bounds
+              const bbox = projectRect(region.x, region.y, region.w, region.h)
               if (bbox) {
                 renderLivePreviewOverlay(
                   context,
@@ -890,6 +915,7 @@ export function AnnotationViewport({
                   imageRect,
                   bbox,
                   liveGenLatencyS != null ? `${liveGenLatencyS.toFixed(1)}s` : '',
+                  !liveGenBusy,
                 )
               }
             }
@@ -913,7 +939,51 @@ export function AnnotationViewport({
       context.stroke()
       context.restore()
     }
-  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, maskPreviewMode, participants, projectionHost, refImageTick, selectedId, viewport, visibleAnnotations])
+  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskPreviewMode, participants, projectionHost, refImageTick, selectedId, viewport, visibleAnnotations])
+
+  // Marching-ants border while a generation is in flight. Runs on its own
+  // canvas so the 60fps dash animation never triggers React re-renders or full
+  // scene redraws; the main draw effect keeps genBusyRectRef current across
+  // pan/zoom and the loop just reads it each frame.
+  useEffect(() => {
+    const canvas = genBusyCanvasRef.current
+    if (!canvas || viewport.width === 0 || viewport.height === 0) {
+      return
+    }
+    const context = canvas.getContext('2d')
+    if (!context) {
+      return
+    }
+    const pixelRatio = window.devicePixelRatio || 1
+    canvas.width = Math.floor(viewport.width * pixelRatio)
+    canvas.height = Math.floor(viewport.height * pixelRatio)
+    canvas.style.width = `${viewport.width}px`
+    canvas.style.height = `${viewport.height}px`
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+    if (!liveGenBusy) {
+      return
+    }
+    let raf = 0
+    const draw = (time: number) => {
+      context.clearRect(0, 0, viewport.width, viewport.height)
+      const rect = genBusyRectRef.current
+      if (rect && rect.w > 0 && rect.h > 0) {
+        context.save()
+        context.setLineDash([6, 4])
+        context.lineDashOffset = -((time / 40) % 10)
+        context.strokeStyle = 'rgba(94, 234, 212, 0.95)'
+        context.lineWidth = 1.5
+        context.strokeRect(rect.x, rect.y, rect.w, rect.h)
+        context.restore()
+      }
+      raf = requestAnimationFrame(draw)
+    }
+    raf = requestAnimationFrame(draw)
+    return () => {
+      cancelAnimationFrame(raf)
+      context.clearRect(0, 0, viewport.width, viewport.height)
+    }
+  }, [liveGenBusy, viewport])
 
   function pointerToLocal(event: { clientX: number; clientY: number }) {
     const canvas = overlayCanvasRef.current
@@ -1152,7 +1222,11 @@ export function AnnotationViewport({
     }
 
     setIsSurfaceFocused(true)
-    surfaceRef.current?.focus()
+    // preventScroll: a plain focus() scrolls the surface into view, shifting
+    // the page under the cursor mid-press — the stroke then lands offset and
+    // the first click reads as "focus only". Drawing must start exactly where
+    // the artist pressed.
+    surfaceRef.current?.focus({ preventScroll: true })
 
     event.currentTarget.setPointerCapture(event.pointerId)
 
@@ -1768,6 +1842,7 @@ export function AnnotationViewport({
           onPointerCancel={handlePointerUp}
           onPointerLeave={handlePointerLeave}
         />
+        <canvas ref={genBusyCanvasRef} className="viewer-canvas viewer-canvas--gen-busy" />
       </div>
       {videoAdapter ? <VideoTransport adapter={videoAdapter} /> : null}
       <footer className="viewer-card__footer">

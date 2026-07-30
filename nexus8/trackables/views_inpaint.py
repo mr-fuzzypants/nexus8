@@ -9,17 +9,16 @@ app "nexus8-inpaint"). Django only spawns the call and tracks its id — no task
 queue needed. Modal credentials come from ~/.modal.toml (CLI auth) or the
 MODAL_TOKEN_ID / MODAL_TOKEN_SECRET environment variables.
 
-The result is stored as a SEPARATE asset linked to the source with
-role="inpaint_preview": it is an ephemeral preview, so it must not pollute the
-source asset's version history, and versioning the mask asset would conflate
-the binary mask with generated RGB output.
+Results land on the layer's render asset as single-variation runs
+(versions × variations model — see LAYER_RENDER_SCHEMA.md), with lineage links
+to the exact source-image and mask versions sent to Modal. Renders never touch
+the source asset's version history.
 """
 
 import logging
 import os
 
 from django.conf import settings
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import permissions, status
@@ -27,14 +26,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import EntityRelation, MediaAsset, VersionedEntity
-from .services.ingest import add_version, ingest_file
+from .models.versions import Version
+from .services import layer_renders
 from .views_annotations import MASK_ROLE
 from .views_blob import _file_ref, _parse_nexus8_uri, _resolve_version
 from .views_library import asset_summary
 
 logger = logging.getLogger(__name__)
-
-INPAINT_ROLE = "inpaint_preview"
 MODAL_APP_NAME = "nexus8-inpaint"
 
 
@@ -94,7 +92,19 @@ def _reference_bytes(uri: str | None) -> bytes | None:
 
 
 def _mask_lookup(source, layer_id):
-    """The layer's mask asset + its relation to the source, as MaskSaveView stores them."""
+    """The layer's mask asset + its relation to the source, as MaskSaveView stores them.
+
+    Enters via the FK-indexed (asset, role) relation edge and matches the layer
+    among the per-asset rows (LAYER_RENDER_SCHEMA.md F12 rule). Masks saved
+    before relations carried layer_id fall back to the legacy JSONB lookup and
+    are healed in place so the next call takes the indexed path.
+    """
+    for relation in EntityRelation.objects.filter(
+        asset=source, role=MASK_ROLE
+    ).select_related("entity"):
+        if relation.type_data.get("layer_id") == layer_id:
+            return relation.entity, relation
+
     mask_asset = MediaAsset.objects.filter(
         type_data__mask_of_asset_id=source.id,
         type_data__mask_layer_id=layer_id,
@@ -104,6 +114,9 @@ def _mask_lookup(source, layer_id):
     relation = EntityRelation.objects.filter(
         asset=source, entity=mask_asset, role=MASK_ROLE
     ).first()
+    if relation is not None:
+        relation.type_data["layer_id"] = layer_id
+        relation.save(update_fields=["type_data", "updated_at"])
     return mask_asset, relation
 
 
@@ -133,16 +146,28 @@ class MaskInpaintTriggerView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Resolve the exact versions whose bytes go to Modal so the stored
+        # render can pin them as lineage (init_image / inpaint_mask).
         version_number = request.data.get("version_number")
-        image_bytes = _version_file_bytes(
-            source, int(version_number) if version_number is not None else None
-        )
+        source_version = None
+        if version_number is not None:
+            source_version = source.versions.filter(
+                version_number=int(version_number)
+            ).first()
+        if source_version is None:
+            source_version = source.versions.order_by(
+                "-version_number", "-variation_number"
+            ).first()
+        image_bytes = _media_bytes(_file_ref(source_version)) if source_version else None
         if not image_bytes:
             return Response(
                 {"detail": "Could not load source image bytes."},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
-        mask_bytes = _version_file_bytes(mask_asset)
+        mask_version = mask_asset.versions.order_by(
+            "-version_number", "-variation_number"
+        ).first()
+        mask_bytes = _media_bytes(_file_ref(mask_version)) if mask_version else None
         if not mask_bytes:
             return Response(
                 {"detail": "Could not load mask bytes."},
@@ -175,6 +200,23 @@ class MaskInpaintTriggerView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        # The run's parameter record, held here until the poll stores it into
+        # the render's Version.data — written once, never overwritten.
+        params = {
+            "prompt": str(prompt),
+            "negative_prompt": str(request.data.get("negative_prompt") or ""),
+            "mode": str(request.data.get("mode") or "fast"),
+        }
+        if request.data.get("num_inference_steps"):
+            params["num_inference_steps"] = int(request.data["num_inference_steps"])
+        if reference_uri:
+            params["reference"] = str(reference_uri)
+        mask_shapes = request.data.get("mask_shapes")
+        if isinstance(mask_shapes, list) and mask_shapes:
+            # The layer's vector strokes at dispatch — lets History restore the
+            # exact input mask as editable shapes (stored once per run).
+            params["mask_shapes"] = mask_shapes
+
         relation.refresh_from_db()
         for key in list(relation.type_data):
             if key.startswith("inpaint_result"):
@@ -184,6 +226,9 @@ class MaskInpaintTriggerView(APIView):
                 "inpaint_call_id": call.object_id,
                 "inpaint_dispatched_at": timezone.now().isoformat(),
                 "inpaint_status": "working",
+                "inpaint_params": params,
+                "inpaint_source_version_id": source_version.pk,
+                "inpaint_mask_version_id": mask_version.pk,
             }
         )
         relation.save(update_fields=["type_data", "updated_at"])
@@ -221,11 +266,9 @@ class MaskInpaintStatusView(APIView):
         # Idempotent re-poll: once done, keep returning the stored result rather
         # than re-fetching from Modal (outputs expire) or re-ingesting.
         if relation.type_data.get("inpaint_status") == "done":
-            result_asset = MediaAsset.objects.filter(
-                pk=relation.type_data.get("inpaint_result_asset_id")
-            ).first()
-            if result_asset is not None:
-                return Response(self._done_payload(relation, result_asset))
+            payload = self._done_payload(relation)
+            if payload is not None:
+                return Response(payload)
 
         import modal
 
@@ -251,9 +294,6 @@ class MaskInpaintStatusView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        result_asset = self._store_result(request, source, layer_id, png_bytes)
-
-        relation.refresh_from_db()
         dispatched_at = relation.type_data.get("inpaint_dispatched_at")
         result_at = timezone.now()
         latency_s = None
@@ -266,86 +306,73 @@ class MaskInpaintStatusView(APIView):
                 )
             except ValueError:
                 pass
+
+        params = dict(relation.type_data.get("inpaint_params") or {})
+        params["modal_call_id"] = call_id
+        params["latency_s"] = latency_s
+
+        render_asset, run, versions = layer_renders.store_run_results(
+            source,
+            layer_id,
+            [png_bytes],
+            op="inpaint",
+            params=params,
+            source_version=Version.objects.filter(
+                pk=relation.type_data.get("inpaint_source_version_id")
+            ).first(),
+            guide_version=Version.objects.filter(
+                pk=relation.type_data.get("inpaint_mask_version_id")
+            ).first(),
+            guide_role="inpaint_mask",
+            created_by=request.user if request.user.is_authenticated else None,
+        )
+
+        relation.refresh_from_db()
         relation.type_data.update(
             {
                 "inpaint_status": "done",
                 "inpaint_result_at": result_at.isoformat(),
-                "inpaint_result_asset_id": result_asset.id,
+                "inpaint_run": run,
+                "inpaint_result_version_id": versions[0].pk,
                 "inpaint_latency_s": latency_s,
             }
         )
         relation.save(update_fields=["type_data", "updated_at"])
 
-        return Response(self._done_payload(relation, result_asset))
+        return Response(self._done_payload(relation))
 
     @staticmethod
-    def _done_payload(relation, result_asset):
+    def _done_payload(relation):
+        """Done response from the stored render; None if it no longer exists
+        (caller falls through to re-poll Modal). Keeps the pre-existing shape
+        the SPA consumes (result.file_path)."""
+        version_id = relation.type_data.get("inpaint_result_version_id")
+        if version_id:
+            version = (
+                Version.objects.filter(pk=version_id).select_related("entity").first()
+            )
+            if version is None:
+                return None
+            result = {
+                "asset_id": version.entity_id,
+                "file_path": version.data.get("file_path"),
+                "thumbnails": version.data.get("thumbnails"),
+                "version_number": version.version_number,
+                "variation_number": version.variation_number,
+            }
+        else:
+            # Legacy per-layer preview asset (pre versions × variations).
+            asset = MediaAsset.objects.filter(
+                pk=relation.type_data.get("inpaint_result_asset_id")
+            ).first()
+            if asset is None:
+                return None
+            result = asset_summary(asset)
         return {
             "status": "done",
-            "result": asset_summary(result_asset),
+            "result": result,
+            "run": relation.type_data.get("inpaint_run"),
             "dispatched_at": relation.type_data.get("inpaint_dispatched_at"),
             "result_at": relation.type_data.get("inpaint_result_at"),
             "latency_s": relation.type_data.get("inpaint_latency_s"),
         }
-
-    @staticmethod
-    def _store_result(request, source, layer_id, png_bytes):
-        """Persist result bytes as the layer's preview asset (new version if it exists)."""
-        uploaded = SimpleUploadedFile(
-            f"{source.name}-inpaint-{layer_id}.png", png_bytes, content_type="image/png"
-        )
-        user = request.user if request.user.is_authenticated else None
-        existing = MediaAsset.objects.filter(
-            type_data__inpaint_preview_of_asset_id=source.id,
-            type_data__inpaint_preview_layer_id=layer_id,
-        ).first()
-        if existing is not None:
-            result_version, _ = add_version(existing, uploaded, created_by=user)
-            result_asset = existing
-        else:
-            result_asset, _created = ingest_file(
-                uploaded, name=f"{source.name} inpaint preview", created_by=user
-            )
-            result_version = result_asset.versions.order_by("-version_number").first()
-
-        result_asset.type_data.update(
-            {
-                "inpaint_preview_of_asset_id": source.id,
-                "inpaint_preview_layer_id": layer_id,
-                "asset_functional_type": "inpaint_preview",
-            }
-        )
-        result_asset.save(update_fields=["type_data", "updated_at"])
-
-        EntityRelation.objects.update_or_create(
-            asset=source,
-            entity=result_asset,
-            role=INPAINT_ROLE,
-            defaults={
-                "source": "ai",
-                "confidence": 1.0,
-                "entity_version": result_version,
-                "entity_version_number": (
-                    result_version.version_number if result_version else None
-                ),
-                "type_data": {"inpaint_preview_layer_id": layer_id},
-            },
-        )
-
-        # Link the mask that produced this result so AssetPanel can show it.
-        mask_asset, mask_rel = _mask_lookup(source, layer_id)
-        if mask_asset and mask_rel:
-            EntityRelation.objects.update_or_create(
-                asset=result_asset,
-                entity=mask_asset,
-                role=MASK_ROLE,
-                defaults={
-                    "source": "ai",
-                    "confidence": 1.0,
-                    "entity_version": mask_rel.entity_version,
-                    "entity_version_number": mask_rel.entity_version_number,
-                    "type_data": {**mask_rel.type_data, "mask_of_asset_id": result_asset.id},
-                },
-            )
-
-        return result_asset

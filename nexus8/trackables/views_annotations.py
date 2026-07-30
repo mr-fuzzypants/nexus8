@@ -184,12 +184,21 @@ class MaskSaveView(APIView):
 
         # If a layer_id is provided, look for the existing mask asset for this layer
         # so we can add a new version rather than creating a whole new asset.
+        # Relation-based entry (LAYER_RENDER_SCHEMA.md F12 rule) with a legacy
+        # JSONB fallback for masks saved before relations carried layer_id.
         existing_mask = None
         if layer_id:
-            existing_mask = MediaAsset.objects.filter(
-                type_data__mask_of_asset_id=source.id,
-                type_data__mask_layer_id=layer_id,
-            ).first()
+            for rel in EntityRelation.objects.filter(
+                asset=source, role=MASK_ROLE
+            ).select_related("entity"):
+                if rel.type_data.get("layer_id") == layer_id:
+                    existing_mask = rel.entity
+                    break
+            if existing_mask is None:
+                existing_mask = MediaAsset.objects.filter(
+                    type_data__mask_of_asset_id=source.id,
+                    type_data__mask_layer_id=layer_id,
+                ).first()
 
         if existing_mask is not None:
             mask_version, _ = add_version(
@@ -222,6 +231,11 @@ class MaskSaveView(APIView):
         # Build relation metadata from submitted fields, preserving any existing
         # values for fields not included in this request.
         relation_type_data: dict = {}
+        if layer_id:
+            # The relation is the indexed entry point for all layer lookups
+            # (_mask_lookup and the render store) — the mirror on the mask
+            # asset's type_data is for debuggability only.
+            relation_type_data["layer_id"] = layer_id
         if mask_op is not None:
             relation_type_data["mask_op"] = mask_op
         if prompt is not None:

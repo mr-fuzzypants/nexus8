@@ -10,13 +10,16 @@ Unlike inpaint, no source image is sent to Modal — the scribble MAP is the
 ControlNet conditioning input. Width/height come from the request body (client
 sends imageDims). The scribble PNG is stored via the existing MaskSaveView
 endpoint with mask_op="scribble" so the same _mask_lookup helper finds it.
+
+Results land on the layer's render asset as one run of parallel variations
+(versions × variations model — see LAYER_RENDER_SCHEMA.md), with lineage links
+to the exact scribble-guide (and, in region mode, source-image) versions used.
 """
 
 import json
 import logging
 import random
 
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -25,15 +28,14 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import EntityRelation, MediaAsset
-from .services.ingest import add_version, ingest_file
-from .views_annotations import MASK_ROLE
-from .views_inpaint import _mask_lookup, _version_file_bytes
+from .models import MediaAsset
+from .models.versions import Version
+from .services import layer_renders
+from .views_inpaint import _file_ref, _mask_lookup, _media_bytes, _version_file_bytes
 from .views_library import asset_summary
 
 logger = logging.getLogger(__name__)
 
-SCRIBBLE_ROLE = "scribble_preview"
 MODAL_APP_NAME = "nexus8-scribble"
 
 
@@ -62,7 +64,12 @@ class ScribbleTriggerView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        scribble_bytes = _version_file_bytes(mask_asset)
+        # Resolve the exact guide version whose bytes go to Modal so stored
+        # renders can pin it as lineage (scribble_guide).
+        guide_version = mask_asset.versions.order_by(
+            "-version_number", "-variation_number"
+        ).first()
+        scribble_bytes = _media_bytes(_file_ref(guide_version)) if guide_version else None
         if not scribble_bytes:
             return Response(
                 {"detail": "Could not load scribble bytes."},
@@ -87,9 +94,15 @@ class ScribbleTriggerView(APIView):
 
         # Region mode: send the source image so Modal can crop+paste back.
         source_bytes = None
+        source_version = None
         mask_dims = None
         if scribble_mode == "region":
-            source_bytes = _version_file_bytes(source)
+            source_version = source.versions.order_by(
+                "-version_number", "-variation_number"
+            ).first()
+            source_bytes = (
+                _media_bytes(_file_ref(source_version)) if source_version else None
+            )
             raw_dims = request.data.get("mask_dims")
             if raw_dims and isinstance(raw_dims, dict):
                 mask_dims = {k: int(v) for k, v in raw_dims.items() if k in ("x", "y", "w", "h")}
@@ -119,6 +132,26 @@ class ScribbleTriggerView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        # The run's parameter record, held here until the poll stores it into
+        # each variation's Version.data — written once, never overwritten.
+        params = {
+            "prompt": str(prompt),
+            "negative_prompt": str(request.data.get("negative_prompt") or ""),
+            "width": width,
+            "height": height,
+            "controlnet_scale": controlnet_scale,
+            "num_inference_steps": num_inference_steps,
+            "scribble_mode": scribble_mode,
+            "num_variants": num_variants,
+        }
+        if mask_dims is not None:
+            params["mask_dims"] = mask_dims
+        mask_shapes = request.data.get("mask_shapes")
+        if isinstance(mask_shapes, list) and mask_shapes:
+            # The layer's vector strokes at dispatch — lets History restore the
+            # exact input mask as editable shapes (stored once per run).
+            params["mask_shapes"] = mask_shapes
+
         relation.refresh_from_db()
         for key in list(relation.type_data):
             if key.startswith("scribble_result"):
@@ -129,6 +162,11 @@ class ScribbleTriggerView(APIView):
                 "scribble_dispatched_at": timezone.now().isoformat(),
                 "scribble_status": "working",
                 "scribble_seed": seed,
+                "scribble_params": params,
+                "scribble_guide_version_id": guide_version.pk,
+                "scribble_source_version_id": (
+                    source_version.pk if source_version else None
+                ),
             }
         )
         relation.save(update_fields=["type_data", "updated_at"])
@@ -278,19 +316,7 @@ class ScribbleStatusView(APIView):
         # Batched Modal function returns a list of PNGs (one per variant);
         # tolerate plain bytes from calls dispatched before the batch change.
         png_list = png_bytes if isinstance(png_bytes, list) else [png_bytes]
-        base_seed = relation.type_data.get("scribble_seed")
-        stored = []
-        for index, png in enumerate(png_list):
-            result_asset = self._store_result(request, source, layer_id, png, index)
-            stored.append(
-                {
-                    "asset_id": result_asset.id,
-                    # Mirrors Modal's per-variant seed rule (base seed + index).
-                    "seed": base_seed + index if isinstance(base_seed, int) else None,
-                }
-            )
 
-        relation.refresh_from_db()
         dispatched_at = relation.type_data.get("scribble_dispatched_at")
         result_at = timezone.now()
         latency_s = None
@@ -304,12 +330,43 @@ class ScribbleStatusView(APIView):
             except ValueError:
                 pass
 
+        base_seed = relation.type_data.get("scribble_seed")
+        params = dict(relation.type_data.get("scribble_params") or {})
+        params["modal_call_id"] = call_id
+        params["latency_s"] = latency_s
+
+        render_asset, run, versions = layer_renders.store_run_results(
+            source,
+            layer_id,
+            png_list,
+            op="scribble",
+            params=params,
+            base_seed=base_seed if isinstance(base_seed, int) else None,
+            source_version=Version.objects.filter(
+                pk=relation.type_data.get("scribble_source_version_id")
+            ).first(),
+            guide_version=Version.objects.filter(
+                pk=relation.type_data.get("scribble_guide_version_id")
+            ).first(),
+            guide_role="scribble_guide",
+            created_by=request.user if request.user.is_authenticated else None,
+        )
+
+        relation.refresh_from_db()
         relation.type_data.update(
             {
                 "scribble_status": "done",
                 "scribble_result_at": result_at.isoformat(),
-                "scribble_result_asset_id": stored[0]["asset_id"],
-                "scribble_results": stored,
+                "scribble_run": run,
+                "scribble_results": [
+                    {
+                        "version_id": v.pk,
+                        "version_number": v.version_number,
+                        "variation_number": v.variation_number,
+                        "seed": v.data.get("generation", {}).get("seed"),
+                    }
+                    for v in versions
+                ],
                 "scribble_latency_s": latency_s,
             }
         )
@@ -319,10 +376,12 @@ class ScribbleStatusView(APIView):
 
     @staticmethod
     def _done_payload(relation):
-        """Build the done response from stored per-variant results.
+        """Build the done response from stored per-variation results.
 
-        Returns None when the recorded result assets no longer exist, so the
-        caller can fall through and re-poll the Modal call instead.
+        Returns None when the recorded versions no longer exist, so the caller
+        can fall through and re-poll the Modal call instead. Entries keep the
+        pre-existing shape the SPA consumes (file_path, seed) with the grid
+        coordinates added.
         """
         stored = relation.type_data.get("scribble_results") or []
         if not stored:
@@ -331,85 +390,37 @@ class ScribbleStatusView(APIView):
                 stored = [{"asset_id": legacy_id, "seed": relation.type_data.get("scribble_seed")}]
         results = []
         for entry in stored:
-            asset = MediaAsset.objects.filter(pk=entry.get("asset_id")).first()
-            if asset is not None:
-                results.append({**asset_summary(asset), "seed": entry.get("seed")})
+            if "version_id" in entry:
+                version = (
+                    Version.objects.filter(pk=entry["version_id"])
+                    .select_related("entity")
+                    .first()
+                )
+                if version is not None:
+                    results.append(
+                        {
+                            "asset_id": version.entity_id,
+                            "file_path": version.data.get("file_path"),
+                            "thumbnails": version.data.get("thumbnails"),
+                            "version_number": version.version_number,
+                            "variation_number": version.variation_number,
+                            "seed": entry.get("seed"),
+                        }
+                    )
+            else:
+                # Legacy per-variant-slot record (pre versions × variations).
+                asset = MediaAsset.objects.filter(pk=entry.get("asset_id")).first()
+                if asset is not None:
+                    results.append({**asset_summary(asset), "seed": entry.get("seed")})
         if not results:
             return None
         return {
             "status": "done",
             "result": results[0],
             "results": results,
+            "run": relation.type_data.get("scribble_run"),
             "dispatched_at": relation.type_data.get("scribble_dispatched_at"),
             "result_at": relation.type_data.get("scribble_result_at"),
             "latency_s": relation.type_data.get("scribble_latency_s"),
             "seed_used": results[0].get("seed"),
         }
-
-    @staticmethod
-    def _store_result(request, source, layer_id, png_bytes, variant=0):
-        uploaded = SimpleUploadedFile(
-            f"{source.name}-scribble-{layer_id}-v{variant}.png",
-            png_bytes,
-            content_type="image/png",
-        )
-        user = request.user if request.user.is_authenticated else None
-        existing = MediaAsset.objects.filter(
-            type_data__scribble_preview_of_asset_id=source.id,
-            type_data__scribble_preview_layer_id=layer_id,
-            type_data__scribble_preview_variant=variant,
-        ).first()
-        if existing is not None:
-            result_version, _ = add_version(existing, uploaded, created_by=user)
-            result_asset = existing
-        else:
-            result_asset, _created = ingest_file(
-                uploaded, name=f"{source.name} scribble preview v{variant}", created_by=user
-            )
-            result_version = result_asset.versions.order_by("-version_number").first()
-
-        result_asset.type_data.update(
-            {
-                "scribble_preview_of_asset_id": source.id,
-                "scribble_preview_layer_id": layer_id,
-                "scribble_preview_variant": variant,
-                "asset_functional_type": "scribble_preview",
-            }
-        )
-        result_asset.save(update_fields=["type_data", "updated_at"])
-
-        EntityRelation.objects.update_or_create(
-            asset=source,
-            entity=result_asset,
-            role=SCRIBBLE_ROLE,
-            defaults={
-                "source": "ai",
-                "confidence": 1.0,
-                "entity_version": result_version,
-                "entity_version_number": (
-                    result_version.version_number if result_version else None
-                ),
-                "type_data": {
-                    "scribble_preview_layer_id": layer_id,
-                    "scribble_preview_variant": variant,
-                },
-            },
-        )
-
-        # Link the scribble map that produced this result so AssetPanel can show it.
-        mask_asset, mask_rel = _mask_lookup(source, layer_id)
-        if mask_asset and mask_rel:
-            EntityRelation.objects.update_or_create(
-                asset=result_asset,
-                entity=mask_asset,
-                role=MASK_ROLE,
-                defaults={
-                    "source": "ai",
-                    "confidence": 1.0,
-                    "entity_version": mask_rel.entity_version,
-                    "entity_version_number": mask_rel.entity_version_number,
-                    "type_data": {**mask_rel.type_data, "mask_of_asset_id": result_asset.id},
-                },
-            )
-
-        return result_asset

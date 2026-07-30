@@ -300,19 +300,30 @@ the assets for debuggability, not as query keys.
 | `type_data` JSONB seq-scans on every lookup | FK-indexed entry via `EntityRelation` |
 | No reproduction story | Compatible with `reproduction_manifest`-style walks over `VersionLink` |
 
-### To build
+### Build status (implemented July 29 2026)
 
-1. `add_version(asset, file, *, variation=0, version_number=None)` — variation
-   support in [ingest.py](nexus8/trackables/services/ingest.py) (currently absent).
-2. Run allocation at dispatch: `select_for_update` / `Max("version_number") + 1`
-   on the render asset so concurrent polls land variants under one run.
-3. Rework `_store_result` in
-   [views_sketch_inpaint.py](nexus8/trackables/views_sketch_inpaint.py) (and the
-   scribble/erase twins) to the write path in §5.
-4. `POST …/select/` endpoint wrapping `update_symlink`.
-5. Serializer exposure of `variation_number` + a versions-grid endpoint for the
-   contact sheet UI.
-6. Migrate `_mask_lookup` to the relation-based entry point.
+1. ✅ `add_version(…, version_number=None, variation=0, extra_data=None,
+   upstream=None)` in [ingest.py](nexus8/trackables/services/ingest.py);
+   `publish()` gained the same grid placement under the entity lock.
+2. ✅ Run allocation under `select_for_update` in
+   [services/layer_renders.py](nexus8/trackables/services/layer_renders.py) —
+   the shared store path (get-or-create render asset, variation storage,
+   lineage links, selection, grid query). Allocation happens at store time
+   (first successful poll) inside one transaction; `add_version`'s
+   content-hash dedup makes concurrent-poll double-stores idempotent.
+3. ✅ All four generation paths converted: sketch-inpaint, scribble, erase,
+   and inpaint ([views_inpaint.py](nexus8/trackables/views_inpaint.py)).
+   Status payloads keep the legacy SPA shape with grid coordinates added;
+   legacy per-slot records still render.
+4. ✅ `POST …/renders/select/` + `GET …/renders/` (contact sheet) in
+   [views_renders.py](nexus8/trackables/views_renders.py).
+5. ✅ Contact sheet UI:
+   [RenderHistoryPanel.tsx](web/src/features/annotator/components/RenderHistoryPanel.tsx)
+   — collapsible runs × variations grid under the layer detail panel; click
+   previews on canvas, star pins the selection.
+6. ✅ `_mask_lookup` enters via the relation edge; legacy masks fall back to
+   the JSONB path once and are healed in place (`layer_id` stamped on the
+   relation). `MaskSaveView` writes `layer_id` on the mask relation.
 
 Legacy stacked-version preview assets are left as-is (experimental data, not
 worth backfilling).

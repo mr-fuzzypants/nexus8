@@ -11,6 +11,7 @@ import {
 } from './core/annotations/freehandPipeline'
 import type {
   AnnotationDocumentSnapshot,
+  AnnotationEntity,
   AnnotationTool,
   CollaborationProfile,
   ParticipantState,
@@ -39,6 +40,7 @@ import { isMaskShape, rasterizeMask, rasterizeScribble, rasterizeSketchInpaintGu
 import { computeMaskBounds } from './maskBounds'
 import { MaskLayersPanel } from './components/MaskLayersPanel'
 import { MaskLayerDetailPanel } from './components/MaskLayerDetailPanel'
+import { RenderHistoryPanel } from './components/RenderHistoryPanel'
 import { DEFAULT_LAYER_ID } from './core/annotations/types'
 import type { AnnotationLayer, MaskOp } from './core/annotations/types'
 import './annotator.css'
@@ -51,6 +53,10 @@ const POLL_INTERVAL_MS = 500
 const LIVE_GEN_TIMEOUT_MS = 90_000
 const MASK_LAYER_COLORS = ['#f97316', '#a78bfa', '#34d399', '#f472b6', '#60a5fa', '#facc15', '#fb923c', '#e879f9']
 const PROFILE_STORAGE_KEY = 'nexus8-annotator-profile'
+const MASK_SIDEBAR_WIDTH_KEY = 'nexus8-annotator-mask-sidebar-width'
+const MASK_SIDEBAR_MIN = 220
+const MASK_SIDEBAR_MAX = 720
+const MASK_SIDEBAR_DEFAULT = 440
 function hashString(value: string) {
   let hash = 0
   for (let i = 0; i < value.length; i += 1) {
@@ -218,6 +224,15 @@ function AnnotatorWorkspace({
   }>({ phase: 'idle' })
   const [livePreviewImage, setLivePreviewImage] = useState<HTMLImageElement | null>(null)
   const [livePreviewIsScribble, setLivePreviewIsScribble] = useState(false)
+  // When previewing a stored render from History: that run's own mask_dims,
+  // so the overlay border shows the region the render actually regenerated
+  // rather than the layer's current strokes. Null for live results.
+  const [livePreviewRegion, setLivePreviewRegion] = useState<{
+    x: number
+    y: number
+    w: number
+    h: number
+  } | null>(null)
   // Batch generation variants: populated when a run returns >1 image. The strip
   // lets the user pick which variant shows as the live preview overlay.
   const [liveVariants, setLiveVariants] = useState<{ img: HTMLImageElement; seed?: number }[]>([])
@@ -229,6 +244,50 @@ function AnnotatorWorkspace({
   // Monotonic generation counter: bumping it aborts in-flight debounce/poll work
   // and marks any late-arriving results as stale (SRED H6 invalidation).
   const liveGenerationRef = useRef(0)
+  // Bumped when a generation completes so the render history contact sheet
+  // refetches its grid while expanded.
+  const [renderHistoryKey, setRenderHistoryKey] = useState(0)
+  // Bumped when a history recipe is applied so the detail panel's local
+  // slider state re-syncs from the updated layer.
+  const [paramsAppliedKey, setParamsAppliedKey] = useState(0)
+  const [maskSidebarWidth, setMaskSidebarWidth] = useState(() => {
+    try {
+      const stored = Number(localStorage.getItem(MASK_SIDEBAR_WIDTH_KEY))
+      if (Number.isFinite(stored) && stored >= MASK_SIDEBAR_MIN && stored <= MASK_SIDEBAR_MAX) {
+        return stored
+      }
+    } catch {
+      // ignore storage failures (private mode, etc.)
+    }
+    return MASK_SIDEBAR_DEFAULT
+  })
+
+  function startMaskSidebarResize(e: React.PointerEvent) {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = maskSidebarWidth
+    const clampWidth = (clientX: number) =>
+      Math.min(MASK_SIDEBAR_MAX, Math.max(MASK_SIDEBAR_MIN, startWidth + (startX - clientX)))
+    const onMove = (ev: PointerEvent) => setMaskSidebarWidth(clampWidth(ev.clientX))
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      try {
+        localStorage.setItem(MASK_SIDEBAR_WIDTH_KEY, String(clampWidth(ev.clientX)))
+      } catch {
+        // ignore storage failures
+      }
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+  const prevGenPhaseRef = useRef<string>('idle')
+  useEffect(() => {
+    if (prevGenPhaseRef.current === 'generating' && liveGenStatus.phase === 'idle') {
+      setRenderHistoryKey((k) => k + 1)
+    }
+    prevGenPhaseRef.current = liveGenStatus.phase
+  }, [liveGenStatus.phase])
 
   useEffect(() => {
     let cancelled = false
@@ -260,6 +319,7 @@ function AnnotatorWorkspace({
     }
     setLivePreviewIsScribble(false)
     setLivePreviewImage((prev) => (prev ? null : prev))
+    setLivePreviewRegion((prev) => (prev ? null : prev))
     setLiveVariants((prev) => (prev.length ? [] : prev))
     setLiveVariantIndex(0)
     setLiveGenStatus((prev) =>
@@ -448,6 +508,33 @@ function AnnotatorWorkspace({
     }
   }
 
+  /** Replace a layer's mask strokes with a run's recorded input strokes
+   *  (History → Restore mask). Goes through the collaborative store, so undo
+   *  brings the replaced strokes back. Fresh ids: the originals may still
+   *  exist (unchanged strokes) or echo back from collaborators. */
+  function handleRestoreMaskShapes(layerId: string, shapes: unknown[]) {
+    invalidateLiveGeneration()
+    const current = room.store
+      .getSnapshot()
+      .annotations.filter((a) => isMaskShape(a) && a.layerId === layerId)
+    for (const a of current) {
+      room.store.removeAnnotation(a.id)
+    }
+    for (const shape of shapes as AnnotationEntity[]) {
+      room.store.upsertAnnotation({ ...shape, id: crypto.randomUUID(), layerId })
+    }
+  }
+
+  /** The layer's current mask strokes as plain JSON — sent with each dispatch
+   *  so the run's generation record can restore the exact input mask later
+   *  (History → Restore mask). Reads the live store snapshot like
+   *  rasterizeAndSaveLayerMask, for the same commit-timing reason. */
+  function getLayerMaskShapes(layerId: string) {
+    return room.store
+      .getSnapshot()
+      .annotations.filter((a) => isMaskShape(a) && a.layerId === layerId)
+  }
+
   /** Rasterize a layer's mask strokes and upload them (with the layer's current
    *  op/prompt/reference metadata). Reads the live store snapshot rather than the
    *  React one — callers may run before React has re-rendered a fresh commit.
@@ -566,7 +653,12 @@ function AnnotatorWorkspace({
       // Auto mode: a real prompt needs full CFG to be followed (LCM harmonizes
       // but ignores semantics — see SRED finding F1), so default to quality.
       const mode = layer?.gen_mode ?? (layer?.prompt?.trim() ? 'quality' : 'fast')
-      await triggerInpaint(asset.id, { layer_id: layerId, prompt: layer?.prompt, mode })
+      await triggerInpaint(asset.id, {
+        layer_id: layerId,
+        prompt: layer?.prompt,
+        mode,
+        mask_shapes: getLayerMaskShapes(layerId),
+      })
       if (gen !== liveGenerationRef.current) {
         return
       }
@@ -590,6 +682,7 @@ function AnnotatorWorkspace({
             img.onload = () => {
               if (gen === liveGenerationRef.current) {
                 setLivePreviewImage(img)
+                setLivePreviewRegion(null)
                 setLiveGenStatus({ phase: 'idle', latencyS: status.latency_s })
               }
             }
@@ -700,6 +793,7 @@ function AnnotatorWorkspace({
         setLiveVariants([])
         setLiveVariantIndex(0)
         setLivePreviewImage(img)
+        setLivePreviewRegion(null)
         setLiveGenStatus({
           phase: 'idle',
           latencyS: (Date.now() - startedAtDraft) / 1000,
@@ -729,6 +823,7 @@ function AnnotatorWorkspace({
         seed: layer?.seed,
         num_variants: layer?.num_variants,
         num_inference_steps: layer?.num_inference_steps,
+        mask_shapes: getLayerMaskShapes(layerId),
       })
       if (gen !== liveGenerationRef.current) return
       setLiveGenStatus({ phase: 'generating' })
@@ -758,6 +853,7 @@ function AnnotatorWorkspace({
             setLiveVariants(variants.length > 1 ? variants : [])
             setLiveVariantIndex(0)
             setLivePreviewImage(variants[0].img)
+            setLivePreviewRegion(null)
             setLiveGenStatus({
               phase: 'idle',
               latencyS: s.latency_s,
@@ -856,6 +952,7 @@ function AnnotatorWorkspace({
         denoise_strength: layer?.denoise_strength,
         reference: layer?.reference,
         reference_scale: layer?.reference_scale,
+        mask_shapes: getLayerMaskShapes(layerId),
       })
       if (gen !== liveGenerationRef.current) return
       setLiveGenStatus({ phase: 'generating' })
@@ -885,6 +982,7 @@ function AnnotatorWorkspace({
             setLiveVariants(variants.length > 1 ? variants : [])
             setLiveVariantIndex(0)
             setLivePreviewImage(variants[0].img)
+            setLivePreviewRegion(null)
             setLiveGenStatus({
               phase: 'idle',
               latencyS: s.latency_s,
@@ -924,7 +1022,10 @@ function AnnotatorWorkspace({
         if (gen === liveGenerationRef.current) setLiveGenStatus({ phase: 'idle' })
         return
       }
-      await triggerErase(asset.id, { layer_id: layerId })
+      await triggerErase(asset.id, {
+        layer_id: layerId,
+        mask_shapes: getLayerMaskShapes(layerId),
+      })
       if (gen !== liveGenerationRef.current) return
       setLiveGenStatus({ phase: 'generating' })
       const startedAt = Date.now()
@@ -943,6 +1044,7 @@ function AnnotatorWorkspace({
               if (gen === liveGenerationRef.current) {
                 setLivePreviewIsScribble(false)
                 setLivePreviewImage(img)
+                setLivePreviewRegion(null)
                 setLiveGenStatus({ phase: 'idle', latencyS: s.latency_s })
               }
             }
@@ -1079,6 +1181,7 @@ function AnnotatorWorkspace({
           liveGenEnabled={liveGenEnabled}
           onLiveGenEnabledChange={setLiveGenEnabled}
           livePreviewImage={livePreviewImage}
+          livePreviewRegion={livePreviewRegion}
           livePreviewIsScribble={livePreviewIsScribble}
           liveGenLatencyS={liveGenStatus.latencyS}
           liveGenBusy={liveGenStatus.phase === 'saving' || liveGenStatus.phase === 'generating'}
@@ -1086,7 +1189,13 @@ function AnnotatorWorkspace({
           onMaskStrokeCommitted={handleMaskStrokeCommitted}
         />
         {annotatorMode === 'mask' && !isVideo && !is3DModel ? (
-          <div className="annotator-page__mask-sidebar">
+          <>
+          <div
+            className="annotator-page__mask-sidebar-resizer"
+            title="Drag to resize"
+            onPointerDown={startMaskSidebarResize}
+          />
+          <div className="annotator-page__mask-sidebar" style={{ width: maskSidebarWidth }}>
             <MaskLayersPanel
               layers={maskLayers}
               activeLayerId={activeMaskLayerId}
@@ -1107,6 +1216,27 @@ function AnnotatorWorkspace({
                 onRegenerate={() => handleRegenerateLayer(activeMaskLayerId)}
                 busy={liveGenStatus.phase === 'saving' || liveGenStatus.phase === 'generating'}
                 lastSeed={liveGenStatus.seedUsed}
+                resyncKey={paramsAppliedKey}
+              />
+            ) : null}
+            {activeMaskLayerId ? (
+              <RenderHistoryPanel
+                assetId={asset.id}
+                layerId={activeMaskLayerId}
+                refreshKey={renderHistoryKey}
+                onPreview={(img, seed, region) => {
+                  setLivePreviewIsScribble(false)
+                  setLiveVariants([])
+                  setLiveVariantIndex(0)
+                  setLivePreviewImage(img)
+                  setLivePreviewRegion(region ?? null)
+                  setLiveGenStatus((prev) => ({ ...prev, seedUsed: seed }))
+                }}
+                onApplyParams={(fields) => {
+                  handleUpdateMaskLayer(activeMaskLayerId, fields)
+                  setParamsAppliedKey((k) => k + 1)
+                }}
+                onRestoreMask={(shapes) => handleRestoreMaskShapes(activeMaskLayerId, shapes)}
               />
             ) : null}
             {liveVariants.length > 1 ? (
@@ -1162,6 +1292,7 @@ function AnnotatorWorkspace({
               </p>
             ) : null}
           </div>
+          </>
         ) : null}
       </div>
     </div>

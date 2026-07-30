@@ -25,9 +25,12 @@ interface Props {
   busy?: boolean
   /** Seed the backend used for the last completed run (server-generated when random). */
   lastSeed?: number
+  /** Bump to force the local slider state to re-sync from the layer (e.g. after
+   *  a history recipe is applied — layer switch is the only other sync point). */
+  resyncKey?: number
 }
 
-export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, lastSeed }: Props) {
+export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, lastSeed, resyncKey }: Props) {
   // Local slider state avoids the slider snapping back during the Yjs round-trip
   // (onChange → upsertLayer → setSnapshot → re-render). Syncs from props on layer switch.
   const [controlnetScale, setControlnetScale] = useState(layer?.controlnet_scale ?? 0.4)
@@ -40,7 +43,7 @@ export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, last
     setGuidanceScale(layer?.guidance_scale ?? (layer?.mask_op === 'sketch_inpaint' ? 7.5 : 1.0))
     setDenoiseStrength(layer?.denoise_strength ?? 1.0)
     setReferenceScale(layer?.reference_scale ?? 0.5)
-  }, [layer?.id])
+  }, [layer?.id, resyncKey])
 
   if (!layer) return null
 

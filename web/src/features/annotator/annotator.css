@@ -105,10 +105,26 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: 220px;
+  /* Width is set inline (default 440px) — user-resizable via the drag handle. */
+  width: 440px;
   flex-shrink: 0;
   min-height: 0;
   overflow-y: auto;
+}
+
+.annotator-page__mask-sidebar-resizer {
+  flex-shrink: 0;
+  width: 6px;
+  margin: 0 -11px 0 -5px; /* sit inside the 16px flex gap */
+  border-radius: 3px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.annotator-page__mask-sidebar-resizer:hover,
+.annotator-page__mask-sidebar-resizer:active {
+  background: rgba(94, 234, 212, 0.35);
 }
 
 /* ── Mask layers panel ── */
@@ -481,6 +497,11 @@
 
 .viewer-canvas--overlay-card-move {
   cursor: move;
+}
+
+.viewer-canvas--gen-busy {
+  z-index: 2;
+  pointer-events: none;
 }
 
 .viewer-loading-overlay {
@@ -1024,4 +1045,233 @@
 .mask-layer-detail-panel__textarea {
   resize: vertical;
   min-height: 56px;
+}
+
+/* Render history contact sheet (versions × variations — LAYER_RENDER_SCHEMA.md) */
+.render-history-panel {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.render-history-panel__toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.7);
+}
+
+.render-history-panel__count {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: rgba(148, 163, 184, 0.5);
+}
+
+.render-history-panel__empty {
+  font-size: 12px;
+  color: rgba(148, 163, 184, 0.5);
+  margin: 0;
+}
+
+.render-history-panel__runs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.render-history-panel__run-header {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11px;
+  margin-bottom: 3px;
+}
+
+.render-history-panel__run-label {
+  color: rgba(94, 234, 212, 0.8);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.render-history-panel__run-prompt {
+  color: rgba(148, 163, 184, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.render-history-panel__cells {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.render-history-panel__cell {
+  position: relative;
+  border-radius: 6px;
+}
+
+.render-history-panel__thumb {
+  display: block;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(30, 41, 59, 0.8);
+  cursor: pointer;
+}
+
+.render-history-panel__cell--previewed .render-history-panel__thumb {
+  border: 2px solid #3b82f6;
+}
+
+.render-history-panel__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.render-history-panel__missing {
+  color: rgba(148, 163, 184, 0.4);
+  font-size: 18px;
+  line-height: 56px;
+}
+
+.render-history-panel__star {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  padding: 0 2px;
+  background: rgba(15, 23, 42, 0.75);
+  border: none;
+  border-radius: 4px;
+  color: rgba(226, 232, 240, 0.75);
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.render-history-panel__star--on {
+  color: #fbbf24;
+}
+
+.render-history-panel__info {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  padding: 0 2px;
+  background: rgba(15, 23, 42, 0.75);
+  border: none;
+  border-radius: 4px;
+  color: rgba(226, 232, 240, 0.7);
+  font-size: 11px;
+  line-height: 15px;
+  cursor: pointer;
+}
+
+.render-history-panel__info--on {
+  color: #5eead4;
+}
+
+.render-history-panel__details {
+  border: 1px solid rgba(94, 234, 212, 0.25);
+  border-radius: 6px;
+  background: rgba(30, 41, 59, 0.6);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.render-history-panel__details-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(94, 234, 212, 0.85);
+}
+
+.render-history-panel__details-close {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  color: rgba(148, 163, 184, 0.6);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.render-history-panel__params {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+}
+
+.render-history-panel__param {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.render-history-panel__param dt {
+  flex: 0 0 64px;
+  color: rgba(148, 163, 184, 0.6);
+}
+
+.render-history-panel__param dd {
+  margin: 0;
+  color: rgba(226, 232, 240, 0.9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.render-history-panel__apply-row {
+  display: flex;
+  gap: 6px;
+}
+
+.render-history-panel__apply {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(59, 130, 246, 0.2);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: 5px;
+  color: #bfdbfe;
+  cursor: pointer;
+}
+
+.render-history-panel__apply--secondary {
+  background: rgba(148, 163, 184, 0.08);
+  border-color: rgba(148, 163, 184, 0.25);
+  color: rgba(226, 232, 240, 0.75);
+  font-weight: 400;
+}
+
+.render-history-panel__applied-note {
+  font-size: 11px;
+  color: rgba(94, 234, 212, 0.8);
+  margin: 0;
 }
