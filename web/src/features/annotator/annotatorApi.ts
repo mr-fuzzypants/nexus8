@@ -336,6 +336,24 @@ export async function getRenderGrid(assetId: number, layerId: string): Promise<R
   return data
 }
 
+/** One layer's pinned render — the canvas compositor's input. */
+export interface SelectedRenderRecord {
+  layer_id: string
+  version_number: number
+  variation_number: number
+  file_path: string | null
+  thumbnails?: Record<string, string>
+  generation?: Record<string, unknown>
+}
+
+/** Every layer's selected render for an asset, in one call. */
+export async function getSelectedRenders(assetId: number): Promise<SelectedRenderRecord[]> {
+  const { data } = await http.get<{ selected: SelectedRenderRecord[] }>(
+    `/trackables/api/library/assets/${assetId}/renders/selected/`,
+  )
+  return data.selected
+}
+
 /** Pin the artist's chosen render (the 'selected' symlink, audited server-side). */
 export async function selectRender(
   assetId: number,

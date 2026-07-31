@@ -345,6 +345,7 @@ function stableLayerRecord(layer: AnnotationLayer) {
     ...(layer.num_variants !== undefined ? { num_variants: layer.num_variants } : {}),
     ...(layer.denoise_strength !== undefined ? { denoise_strength: layer.denoise_strength } : {}),
     ...(layer.reference_scale !== undefined ? { reference_scale: layer.reference_scale } : {}),
+    ...(layer.render_visible !== undefined ? { render_visible: layer.render_visible } : {}),
   }
 }
 

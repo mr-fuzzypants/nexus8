@@ -111,6 +111,13 @@ interface ViewportProps {
    *  layer's current strokes, which may have changed since the run. */
   livePreviewRegion?: { x: number; y: number; w: number; h: number } | null
   livePreviewIsScribble?: boolean
+  /** Selected-render composite: each entry drawn full-frame, clipped to its
+   *  region (null = full frame), in array order (first = bottom). */
+  layerRenders?: Array<{
+    layerId: string
+    img: HTMLImageElement
+    region: { x: number; y: number; w: number; h: number } | null
+  }>
   liveGenLatencyS?: number
   liveGenBusy?: boolean
   onMaskStrokeStarted?: () => void
@@ -191,6 +198,7 @@ export function AnnotationViewport({
   livePreviewImage,
   livePreviewRegion = null,
   livePreviewIsScribble = false,
+  layerRenders = [],
   liveGenLatencyS,
   liveGenBusy = false,
   onMaskStrokeStarted,
@@ -324,7 +332,7 @@ export function AnnotationViewport({
         if (activeMaskLayerId) {
           const visibleMaskLayerIds = new Set(
             (maskLayers ?? [])
-              .filter((l) => l.id === activeMaskLayerId || l.visible)
+              .filter((l) => l.visible)
               .map((l) => l.id),
           )
           filtered = filtered.filter(
@@ -826,6 +834,48 @@ export function AnnotationViewport({
     if (!isViewerReady) {
       return
     }
+    // Selected-render composite: every render-visible layer's pinned render,
+    // stacked bottom-to-top in panel order. Drawn under stroke primitives so
+    // guide strokes (their own visibility toggle) stay legible on top; the
+    // active layer's op preview and live-gen overlay composite above both.
+    if (annotatorMode === 'mask' && imageDims && layerRenders.length > 0) {
+      const toScreen = (x: number, y: number) => adapter.worldToScreen({ x, y, z: 0 }, viewport)
+      const screenRect = (x: number, y: number, w: number, h: number): ScreenRect | null => {
+        const tl = toScreen(x, y)
+        const br = toScreen(x + w, y + h)
+        if (!tl || !br) {
+          return null
+        }
+        return {
+          x: Math.min(tl.x, br.x),
+          y: Math.min(tl.y, br.y),
+          w: Math.abs(br.x - tl.x),
+          h: Math.abs(br.y - tl.y),
+        }
+      }
+      const imageRect = screenRect(0, 0, imageDims.width, imageDims.height)
+      if (imageRect) {
+        for (const entry of layerRenders) {
+          const clipRect = entry.region
+            ? screenRect(entry.region.x, entry.region.y, entry.region.w, entry.region.h)
+            : null
+          if (entry.region && !clipRect) {
+            continue
+          }
+          context.save()
+          if (clipRect) {
+            context.beginPath()
+            context.rect(clipRect.x, clipRect.y, clipRect.w, clipRect.h)
+            context.clip()
+          }
+          // Renders are full-frame images; mapping to the image rect keeps
+          // them pixel-aligned with the base regardless of clip region.
+          context.drawImage(entry.img, imageRect.x, imageRect.y, imageRect.w, imageRect.h)
+          context.restore()
+        }
+      }
+    }
+
     const plan = buildAnnotationSceneRenderPlan({
       projectionHost,
       viewport,
@@ -939,7 +989,7 @@ export function AnnotationViewport({
       context.stroke()
       context.restore()
     }
-  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskPreviewMode, participants, projectionHost, refImageTick, selectedId, viewport, visibleAnnotations])
+  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, layerRenders, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskPreviewMode, participants, projectionHost, refImageTick, selectedId, viewport, visibleAnnotations])
 
   // Marching-ants border while a generation is in flight. Runs on its own
   // canvas so the 60fps dash animation never triggers React re-renders or full

@@ -315,12 +315,19 @@ the assets for debuggability, not as query keys.
    and inpaint ([views_inpaint.py](nexus8/trackables/views_inpaint.py)).
    Status payloads keep the legacy SPA shape with grid coordinates added;
    legacy per-slot records still render.
-4. ✅ `POST …/renders/select/` + `GET …/renders/` (contact sheet) in
-   [views_renders.py](nexus8/trackables/views_renders.py).
+4. ✅ `POST …/renders/select/` + `GET …/renders/` (contact sheet) +
+   `GET …/renders/selected/` (every layer's pinned render, the canvas
+   compositor's input) in [views_renders.py](nexus8/trackables/views_renders.py).
+   A layer's first-ever stored run auto-pins its variation 0; later runs never
+   move an existing selection.
 5. ✅ Contact sheet UI:
    [RenderHistoryPanel.tsx](web/src/features/annotator/components/RenderHistoryPanel.tsx)
-   — collapsible runs × variations grid under the layer detail panel; click
-   previews on canvas, star pins the selection.
+   — runs × variations grid on the sidebar's History tab; clicking a cell
+   moves the `selected` symlink, which is what the canvas composite displays.
+   The composite stacks every render-visible layer's pinned render in panel
+   order (each clipped to its run's `mask_dims`), under the mask strokes and
+   the live-gen overlay; per-layer `render_visible` on the annotation-doc
+   layer object controls participation.
 6. ✅ `_mask_lookup` enters via the relation edge; legacy masks fall back to
    the JSONB path once and are healed in place (`layer_id` stamped on the
    relation). `MaskSaveView` writes `layer_id` on the mask relation.

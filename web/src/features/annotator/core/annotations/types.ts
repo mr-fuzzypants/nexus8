@@ -142,6 +142,9 @@ export interface AnnotationLayer {
   color?: string
   /** Sort order within the mask layers panel (lower = higher in list). */
   order?: number
+  /** Whether the layer's selected render participates in the canvas composite.
+   *  Independent of `visible` (mask strokes/guides). Undefined = true. */
+  render_visible?: boolean
   /** AI operation this mask region is intended for. */
   mask_op?: MaskOp
   /** Natural language prompt for generative AI operations. */

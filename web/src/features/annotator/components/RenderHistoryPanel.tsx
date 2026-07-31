@@ -32,12 +32,10 @@ export interface MaskRegion {
 interface Props {
   assetId: number
   layerId: string
-  /** Bump to refetch while expanded (e.g. after a generation completes). */
+  /** Bump to refetch (e.g. after a generation completes). */
   refreshKey?: number
-  /** Show a stored render as the canvas overlay. `region` is the run's own
-   *  mask_dims — the area that render actually regenerated, which may differ
-   *  from the layer's current strokes. */
-  onPreview?: (img: HTMLImageElement, seed?: number, region?: MaskRegion) => void
+  /** The star moved: a cell click re-pinned the layer's selected render. */
+  onSelectionChanged?: () => void
   /** Write a stored render's recipe back into the layer controls. */
   onApplyParams?: (fields: AppliableRenderParams) => void
   /** Replace the layer's current mask strokes with the run's input strokes. */
@@ -123,22 +121,20 @@ function cellKey(v: number, m: number) {
 /**
  * Contact sheet for a layer's stored renders: runs (rows, newest first) ×
  * variations (columns), from the versions × variations model
- * (LAYER_RENDER_SCHEMA.md). Click a cell to preview it on the canvas; star a
- * cell to pin it as the layer's selected render; ⓘ opens the render's recipe
- * with apply-to-layer actions.
+ * (LAYER_RENDER_SCHEMA.md). Clicking a cell pins it as the layer's selected
+ * render (the audited symlink), which is what the canvas composite displays;
+ * ⓘ opens the render's recipe with apply-to-layer actions.
  */
 export function RenderHistoryPanel({
   assetId,
   layerId,
   refreshKey = 0,
-  onPreview,
+  onSelectionChanged,
   onApplyParams,
   onRestoreMask,
 }: Props) {
-  const [expanded, setExpanded] = useState(false)
   const [grid, setGrid] = useState<RenderGrid | null>(null)
   const [loading, setLoading] = useState(false)
-  const [previewedKey, setPreviewedKey] = useState<string | null>(null)
   const [detailsKey, setDetailsKey] = useState<string | null>(null)
   const [appliedNote, setAppliedNote] = useState<string | null>(null)
 
@@ -155,29 +151,15 @@ export function RenderHistoryPanel({
 
   useEffect(() => {
     setGrid(null)
-    setPreviewedKey(null)
     setDetailsKey(null)
     setAppliedNote(null)
   }, [layerId])
 
+  // Mounted only while the History tab is active, so fetch eagerly; refreshKey
+  // bumps refetch in place when a generation completes mid-view.
   useEffect(() => {
-    if (expanded) void refetch()
-  }, [expanded, refreshKey, refetch])
-
-  async function handlePreview(
-    filePath: string | null | undefined,
-    seed: number | undefined,
-    key: string,
-    region: MaskRegion | undefined,
-  ) {
-    if (!filePath || !onPreview) return
-    const img = new Image()
-    img.onload = () => {
-      onPreview(img, seed, region)
-      setPreviewedKey(key)
-    }
-    img.src = filePath
-  }
+    void refetch()
+  }, [refreshKey, refetch])
 
   async function handleSelect(versionNumber: number, variationNumber: number) {
     try {
@@ -190,6 +172,7 @@ export function RenderHistoryPanel({
             }
           : prev,
       )
+      onSelectionChanged?.()
     } catch {
       // Selection failures are non-fatal — the grid keeps its prior state.
     }
@@ -222,175 +205,152 @@ export function RenderHistoryPanel({
 
   return (
     <div className="render-history-panel">
-      <button
-        type="button"
-        className="render-history-panel__toggle"
-        onClick={() => setExpanded((e) => !e)}
-      >
-        <span>{expanded ? '▾' : '▸'} History</span>
-        {expanded && runCount > 0 ? (
-          <span className="render-history-panel__count">
+      {loading && !grid ? (
+        <p className="render-history-panel__empty">Loading…</p>
+      ) : !grid || grid.runs.length === 0 ? (
+        <p className="render-history-panel__empty">No stored renders for this layer yet.</p>
+      ) : (
+        <>
+          <div className="render-history-panel__count">
             {runCount} run{runCount === 1 ? '' : 's'}
-          </span>
-        ) : null}
-      </button>
-
-      {expanded ? (
-        loading && !grid ? (
-          <p className="render-history-panel__empty">Loading…</p>
-        ) : !grid || grid.runs.length === 0 ? (
-          <p className="render-history-panel__empty">No stored renders for this layer yet.</p>
-        ) : (
-          <>
-            <div className="render-history-panel__runs">
-              {grid.runs.map((run) => {
-                const gen = run.results[0]?.generation as GenerationRecord | undefined
-                return (
-                  <div key={run.run} className="render-history-panel__run">
-                    <div className="render-history-panel__run-header" title={gen?.prompt}>
-                      <span className="render-history-panel__run-label">v{run.run}</span>
-                      <span className="render-history-panel__run-prompt">
-                        {gen?.prompt ?? gen?.op ?? ''}
-                      </span>
-                    </div>
-                    <div className="render-history-panel__cells">
-                      {run.results.map((cell) => {
-                        const vn = cell.version_number ?? run.run
-                        const mn = cell.variation_number ?? 0
-                        const key = cellKey(vn, mn)
-                        const isSelected =
-                          grid.selected?.version_number === vn &&
-                          grid.selected?.variation_number === mn
-                        const isPreviewed = previewedKey === key
-                        const thumb = cell.thumbnails?.['256'] || cell.file_path || undefined
-                        return (
-                          <div
-                            key={key}
-                            className={
-                              'render-history-panel__cell' +
-                              (isPreviewed ? ' render-history-panel__cell--previewed' : '')
+          </div>
+          <div className="render-history-panel__runs">
+            {grid.runs.map((run) => {
+              const gen = run.results[0]?.generation as GenerationRecord | undefined
+              return (
+                <div key={run.run} className="render-history-panel__run">
+                  <div className="render-history-panel__run-header" title={gen?.prompt}>
+                    <span className="render-history-panel__run-label">v{run.run}</span>
+                    <span className="render-history-panel__run-prompt">
+                      {gen?.prompt ?? gen?.op ?? ''}
+                    </span>
+                  </div>
+                  <div className="render-history-panel__cells">
+                    {run.results.map((cell) => {
+                      const vn = cell.version_number ?? run.run
+                      const mn = cell.variation_number ?? 0
+                      const key = cellKey(vn, mn)
+                      const isSelected =
+                        grid.selected?.version_number === vn &&
+                        grid.selected?.variation_number === mn
+                      const thumb = cell.thumbnails?.['256'] || cell.file_path || undefined
+                      return (
+                        <div
+                          key={key}
+                          className={
+                            'render-history-panel__cell' +
+                            (isSelected ? ' render-history-panel__cell--selected' : '')
+                          }
+                        >
+                          <button
+                            type="button"
+                            className="render-history-panel__thumb"
+                            title={
+                              (cell.seed != null
+                                ? `v${vn}.${mn} — seed ${cell.seed}`
+                                : `v${vn}.${mn}`) + ' — click to display this render'
                             }
+                            onClick={() => void handleSelect(vn, mn)}
                           >
-                            <button
-                              type="button"
-                              className="render-history-panel__thumb"
-                              title={
-                                cell.seed != null
-                                  ? `v${vn}.${mn} — seed ${cell.seed}`
-                                  : `v${vn}.${mn}`
-                              }
-                              onClick={() =>
-                              void handlePreview(
-                                cell.file_path,
-                                cell.seed,
-                                key,
-                                (cell.generation as GenerationRecord | undefined)?.mask_dims,
-                              )
-                            }
+                            {thumb ? (
+                              <img src={thumb} alt={`v${vn}.${mn}`} loading="lazy" />
+                            ) : (
+                              <span className="render-history-panel__missing">?</span>
+                            )}
+                          </button>
+                          {isSelected ? (
+                            <span
+                              className="render-history-panel__star render-history-panel__star--on"
+                              title="The layer's selected render"
                             >
-                              {thumb ? (
-                                <img src={thumb} alt={`v${vn}.${mn}`} loading="lazy" />
-                              ) : (
-                                <span className="render-history-panel__missing">?</span>
-                              )}
-                            </button>
+                              ★
+                            </span>
+                          ) : null}
+                          {cell.generation ? (
                             <button
                               type="button"
                               className={
-                                'render-history-panel__star' +
-                                (isSelected ? ' render-history-panel__star--on' : '')
+                                'render-history-panel__info' +
+                                (detailsKey === key ? ' render-history-panel__info--on' : '')
                               }
-                              title={isSelected ? 'Selected render' : 'Select this render'}
-                              onClick={() => void handleSelect(vn, mn)}
+                              title="View the parameters that created this render"
+                              onClick={() =>
+                                setDetailsKey((prev) => (prev === key ? null : key))
+                              }
                             >
-                              {isSelected ? '★' : '☆'}
+                              ⓘ
                             </button>
-                            {cell.generation ? (
-                              <button
-                                type="button"
-                                className={
-                                  'render-history-panel__info' +
-                                  (detailsKey === key ? ' render-history-panel__info--on' : '')
-                                }
-                                title="View the parameters that created this render"
-                                onClick={() =>
-                                  setDetailsKey((prev) => (prev === key ? null : key))
-                                }
-                              >
-                                ⓘ
-                              </button>
-                            ) : null}
-                          </div>
-                        )
-                      })}
-                    </div>
+                          ) : null}
+                        </div>
+                      )
+                    })}
                   </div>
-                )
-              })}
-            </div>
+                </div>
+              )
+            })}
+          </div>
 
-            {detailsKey && detailsGen ? (
-              <div className="render-history-panel__details">
-                <div className="render-history-panel__details-header">
-                  <span>v{detailsKey}</span>
+          {detailsKey && detailsGen ? (
+            <div className="render-history-panel__details">
+              <div className="render-history-panel__details-header">
+                <span>v{detailsKey}</span>
+                <button
+                  type="button"
+                  className="render-history-panel__details-close"
+                  onClick={() => setDetailsKey(null)}
+                >
+                  ✕
+                </button>
+              </div>
+              <dl className="render-history-panel__params">
+                {paramRows(detailsGen).map(([label, value]) => (
+                  <div key={label} className="render-history-panel__param">
+                    <dt>{label}</dt>
+                    <dd title={value}>{value}</dd>
+                  </div>
+                ))}
+              </dl>
+              {onApplyParams ? (
+                <div className="render-history-panel__apply-row">
                   <button
                     type="button"
-                    className="render-history-panel__details-close"
-                    onClick={() => setDetailsKey(null)}
+                    className="render-history-panel__apply"
+                    title="Set the layer's op, prompt, seed and settings to this render's recipe"
+                    onClick={() => handleApply(detailsGen, detailsKey, true)}
                   >
-                    ✕
+                    Apply to layer
                   </button>
-                </div>
-                <dl className="render-history-panel__params">
-                  {paramRows(detailsGen).map(([label, value]) => (
-                    <div key={label} className="render-history-panel__param">
-                      <dt>{label}</dt>
-                      <dd title={value}>{value}</dd>
-                    </div>
-                  ))}
-                </dl>
-                {onApplyParams ? (
-                  <div className="render-history-panel__apply-row">
-                    <button
-                      type="button"
-                      className="render-history-panel__apply"
-                      title="Set the layer's op, prompt, seed and settings to this render's recipe"
-                      onClick={() => handleApply(detailsGen, detailsKey, true)}
-                    >
-                      Apply to layer
-                    </button>
-                    <button
-                      type="button"
-                      className="render-history-panel__apply render-history-panel__apply--secondary"
-                      title="Apply the recipe but keep the seed random"
-                      onClick={() => handleApply(detailsGen, detailsKey, false)}
-                    >
-                      Without seed
-                    </button>
-                  </div>
-                ) : null}
-                {onRestoreMask && restoreShapes?.length ? (
                   <button
                     type="button"
                     className="render-history-panel__apply render-history-panel__apply--secondary"
-                    title={`Replace this layer's strokes with the ${restoreShapes.length} stroke${restoreShapes.length === 1 ? '' : 's'} that produced run v${detailsRun?.run} (undo restores the current ones)`}
-                    onClick={() => {
-                      onRestoreMask(restoreShapes)
-                      setAppliedNote(`Restored mask from v${detailsRun?.run}`)
-                      window.setTimeout(() => setAppliedNote(null), 2000)
-                    }}
+                    title="Apply the recipe but keep the seed random"
+                    onClick={() => handleApply(detailsGen, detailsKey, false)}
                   >
-                    Restore mask ({restoreShapes.length} stroke{restoreShapes.length === 1 ? '' : 's'})
+                    Without seed
                   </button>
-                ) : null}
-                {appliedNote ? (
-                  <p className="render-history-panel__applied-note">{appliedNote}</p>
-                ) : null}
-              </div>
-            ) : null}
-          </>
-        )
-      ) : null}
+                </div>
+              ) : null}
+              {onRestoreMask && restoreShapes?.length ? (
+                <button
+                  type="button"
+                  className="render-history-panel__apply render-history-panel__apply--secondary"
+                  title={`Replace this layer's strokes with the ${restoreShapes.length} stroke${restoreShapes.length === 1 ? '' : 's'} that produced run v${detailsRun?.run} (undo restores the current ones)`}
+                  onClick={() => {
+                    onRestoreMask(restoreShapes)
+                    setAppliedNote(`Restored mask from v${detailsRun?.run}`)
+                    window.setTimeout(() => setAppliedNote(null), 2000)
+                  }}
+                >
+                  Restore mask ({restoreShapes.length} stroke{restoreShapes.length === 1 ? '' : 's'})
+                </button>
+              ) : null}
+              {appliedNote ? (
+                <p className="render-history-panel__applied-note">{appliedNote}</p>
+              ) : null}
+            </div>
+          ) : null}
+        </>
+      )}
     </div>
   )
 }

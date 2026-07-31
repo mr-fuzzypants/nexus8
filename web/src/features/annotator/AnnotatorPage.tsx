@@ -24,6 +24,7 @@ import {
   getInpaintStatus,
   getOrCreateAnnotationDoc,
   getScribbleStatus,
+  getSelectedRenders,
   saveDocState,
   saveMask,
   snapshotAnnotationDoc,
@@ -42,7 +43,7 @@ import { MaskLayersPanel } from './components/MaskLayersPanel'
 import { MaskLayerDetailPanel } from './components/MaskLayerDetailPanel'
 import { RenderHistoryPanel } from './components/RenderHistoryPanel'
 import { DEFAULT_LAYER_ID } from './core/annotations/types'
-import type { AnnotationLayer, MaskOp } from './core/annotations/types'
+import type { AnnotationLayer } from './core/annotations/types'
 import './annotator.css'
 
 const PROFILE_COLORS = ['#5eead4', '#f97316', '#60a5fa', '#f472b6', '#a78bfa', '#facc15']
@@ -213,6 +214,8 @@ function AnnotatorWorkspace({
   const [annotatorMode, setAnnotatorMode] = useState<'annotate' | 'mask'>('annotate')
   const [activeMaskLayerId, setActiveMaskLayerId] = useState<string | null>(null)
   const [maskGenerateState, setMaskGenerateState] = useState<Record<string, 'idle' | 'working' | string>>({})
+  // Sidebar tab below the layers list: parameter controls vs render history.
+  const [sidebarTab, setSidebarTab] = useState<'params' | 'history'>('params')
   const [previewMode, setPreviewMode] = useState(false)
   const [imageDims, setImageDims] = useState<{ width: number; height: number } | null>(null)
   const [liveGenEnabled, setLiveGenEnabled] = useState(false)
@@ -244,9 +247,14 @@ function AnnotatorWorkspace({
   // Monotonic generation counter: bumping it aborts in-flight debounce/poll work
   // and marks any late-arriving results as stale (SRED H6 invalidation).
   const liveGenerationRef = useRef(0)
-  // Bumped when a generation completes so the render history contact sheet
-  // refetches its grid while expanded.
+  // Bumped when a generation completes or a selection moves, so the render
+  // history grid and the selected-render composite both refetch.
   const [renderHistoryKey, setRenderHistoryKey] = useState(0)
+  // Each layer's pinned render, decoded and ready for the canvas composite.
+  // Region is the run's mask_dims (the area it regenerated); null = full frame.
+  const [layerRenderMap, setLayerRenderMap] = useState<
+    Record<string, { img: HTMLImageElement; region: { x: number; y: number; w: number; h: number } | null }>
+  >({})
   // Bumped when a history recipe is applied so the detail panel's local
   // slider state re-syncs from the updated layer.
   const [paramsAppliedKey, setParamsAppliedKey] = useState(0)
@@ -306,6 +314,39 @@ function AnnotatorWorkspace({
       cancelled = true
     }
   }, [asset])
+
+  // Selected-render composite inputs: fetched per asset, refreshed whenever a
+  // generation completes or the selection moves (renderHistoryKey bumps).
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const records = await getSelectedRenders(asset.id)
+        const entries = await Promise.all(
+          records.map(async (record) => {
+            if (!record.file_path) return null
+            const img = await loadImageElement(record.file_path)
+            if (!img) return null
+            const region =
+              (record.generation?.mask_dims as
+                | { x: number; y: number; w: number; h: number }
+                | undefined) ?? null
+            return [record.layer_id, { img, region }] as const
+          }),
+        )
+        if (!cancelled) {
+          setLayerRenderMap(
+            Object.fromEntries(entries.filter((entry) => entry != null)),
+          )
+        }
+      } catch {
+        // The composite is an enhancement — a failed fetch just leaves it empty.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [asset.id, renderHistoryKey])
 
   function invalidateLiveGeneration() {
     liveGenerationRef.current += 1
@@ -408,16 +449,29 @@ function AnnotatorWorkspace({
   // Mask layers are all layers except the default annotation layer, sorted by order.
   const maskLayers = snapshot.layers.filter((l) => l.id !== DEFAULT_LAYER_ID)
 
+  // Canvas composite: render-visible layers' pinned renders, bottom of the
+  // panel first (higher `order`) so the top-of-panel layer draws last and wins
+  // overlaps. The active layer drops out while an ephemeral live preview is
+  // showing — the preview is that layer's current visual.
+  const layerRenderComposite = maskLayers
+    .filter((l) => l.render_visible !== false && layerRenderMap[l.id])
+    .filter((l) => !(livePreviewImage && l.id === activeMaskLayerId))
+    .sort((a, b) => (b.order ?? 0) - (a.order ?? 0))
+    .map((l) => ({ layerId: l.id, ...layerRenderMap[l.id] }))
+
   const selectedAnnotation = snapshot.annotations.find((annotation) => annotation.id === selectedId)
   const activeSelectionId = selectedAnnotation ? selectedAnnotation.id : undefined
 
   function handleSelectMaskLayer(id: string) {
     setActiveMaskLayerId(id)
-    // Hide all other mask layers so the canvas is uncluttered; the user can
-    // re-show individual layers via the eye icon for reference.
     maskLayers.forEach((layer) => {
       if (layer.id !== id && layer.visible) {
         room.store.upsertLayer({ ...layer, visible: false })
+      }
+      // Re-show the newly active layer's strokes — it may have been hidden
+      // while inactive; the eye toggle controls this after selection.
+      if (layer.id === id && !layer.visible) {
+        room.store.upsertLayer({ ...layer, visible: true })
       }
     })
   }
@@ -481,6 +535,25 @@ function AnnotatorWorkspace({
     if (layer) {
       room.store.upsertLayer({ ...layer, visible: !layer.visible })
     }
+  }
+
+  function handleToggleRenderVisibility(id: string) {
+    const layer = maskLayers.find((l) => l.id === id)
+    if (layer) {
+      room.store.upsertLayer({ ...layer, render_visible: layer.render_visible === false })
+    }
+  }
+
+  /** A History click re-pinned the star: drop any ephemeral preview overlay so
+   *  the composite shows the new selection, then refetch. Leaves the live-gen
+   *  counter alone — an in-flight run keeps polling and stores normally. */
+  function handleRenderSelectionChanged() {
+    setLivePreviewIsScribble(false)
+    setLivePreviewImage(null)
+    setLivePreviewRegion(null)
+    setLiveVariants([])
+    setLiveVariantIndex(0)
+    setRenderHistoryKey((k) => k + 1)
   }
 
   function handleMoveMaskLayerUp(id: string) {
@@ -1183,6 +1256,7 @@ function AnnotatorWorkspace({
           livePreviewImage={livePreviewImage}
           livePreviewRegion={livePreviewRegion}
           livePreviewIsScribble={livePreviewIsScribble}
+          layerRenders={layerRenderComposite}
           liveGenLatencyS={liveGenStatus.latencyS}
           liveGenBusy={liveGenStatus.phase === 'saving' || liveGenStatus.phase === 'generating'}
           onMaskStrokeStarted={invalidateLiveGeneration}
@@ -1205,11 +1279,40 @@ function AnnotatorWorkspace({
               onRemoveLayer={handleRemoveMaskLayer}
               onRenameLayer={handleRenameMaskLayer}
               onToggleVisibility={handleToggleLayerVisibility}
+              onToggleRenderVisibility={handleToggleRenderVisibility}
               onMoveLayerUp={handleMoveMaskLayerUp}
               onMoveLayerDown={handleMoveMaskLayerDown}
               onGenerateMask={handleGenerateMaskForLayer}
             />
             {activeMaskLayerId ? (
+              <div className="annotator-page__sidebar-tabs" role="tablist">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sidebarTab === 'params'}
+                  className={
+                    'annotator-page__sidebar-tab' +
+                    (sidebarTab === 'params' ? ' annotator-page__sidebar-tab--active' : '')
+                  }
+                  onClick={() => setSidebarTab('params')}
+                >
+                  Parameters
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sidebarTab === 'history'}
+                  className={
+                    'annotator-page__sidebar-tab' +
+                    (sidebarTab === 'history' ? ' annotator-page__sidebar-tab--active' : '')
+                  }
+                  onClick={() => setSidebarTab('history')}
+                >
+                  History
+                </button>
+              </div>
+            ) : null}
+            {activeMaskLayerId && sidebarTab === 'params' ? (
               <MaskLayerDetailPanel
                 layer={maskLayers.find((l) => l.id === activeMaskLayerId) ?? null}
                 onUpdate={(fields) => handleUpdateMaskLayer(activeMaskLayerId, fields)}
@@ -1219,19 +1322,12 @@ function AnnotatorWorkspace({
                 resyncKey={paramsAppliedKey}
               />
             ) : null}
-            {activeMaskLayerId ? (
+            {activeMaskLayerId && sidebarTab === 'history' ? (
               <RenderHistoryPanel
                 assetId={asset.id}
                 layerId={activeMaskLayerId}
                 refreshKey={renderHistoryKey}
-                onPreview={(img, seed, region) => {
-                  setLivePreviewIsScribble(false)
-                  setLiveVariants([])
-                  setLiveVariantIndex(0)
-                  setLivePreviewImage(img)
-                  setLivePreviewRegion(region ?? null)
-                  setLiveGenStatus((prev) => ({ ...prev, seedUsed: seed }))
-                }}
+                onSelectionChanged={handleRenderSelectionChanged}
                 onApplyParams={(fields) => {
                   handleUpdateMaskLayer(activeMaskLayerId, fields)
                   setParamsAppliedKey((k) => k + 1)

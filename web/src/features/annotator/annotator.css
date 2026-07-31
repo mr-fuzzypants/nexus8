@@ -132,7 +132,6 @@
 .mask-layers-panel {
   display: flex;
   flex-direction: column;
-  width: 220px;
   flex-shrink: 0;
   border-radius: 22px;
   border: 1px solid rgba(148, 163, 184, 0.14);
@@ -1047,6 +1046,37 @@
   min-height: 56px;
 }
 
+/* Parameters | History tab bar below the layers list */
+.annotator-page__sidebar-tabs {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.annotator-page__sidebar-tab {
+  flex: 1;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.7);
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.annotator-page__sidebar-tab:hover {
+  color: rgba(226, 232, 240, 0.85);
+}
+
+.annotator-page__sidebar-tab--active {
+  color: #5eead4;
+  border-color: rgba(94, 234, 212, 0.4);
+}
+
 /* Render history contact sheet (versions × variations — LAYER_RENDER_SCHEMA.md) */
 .render-history-panel {
   background: rgba(15, 23, 42, 0.85);
@@ -1058,25 +1088,8 @@
   gap: 8px;
 }
 
-.render-history-panel__toggle {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: none;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: rgba(148, 163, 184, 0.7);
-}
-
 .render-history-panel__count {
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: normal;
+  font-size: 11px;
   color: rgba(148, 163, 184, 0.5);
 }
 
@@ -1138,8 +1151,8 @@
   cursor: pointer;
 }
 
-.render-history-panel__cell--previewed .render-history-panel__thumb {
-  border: 2px solid #3b82f6;
+.render-history-panel__cell--selected .render-history-panel__thumb {
+  border: 2px solid #fbbf24;
 }
 
 .render-history-panel__thumb img {

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Eye, EyeOff, ChevronUp, ChevronDown, Plus, Trash2, Wand2 } from 'lucide-react'
+import { Eye, EyeOff, ChevronUp, ChevronDown, Image, ImageOff, Plus, Trash2, Wand2 } from 'lucide-react'
 import type { AnnotationLayer } from '../core/annotations/types'
 
 interface MaskLayersPanelProps {
@@ -11,6 +11,7 @@ interface MaskLayersPanelProps {
   onRemoveLayer: (id: string) => void
   onRenameLayer: (id: string, name: string) => void
   onToggleVisibility: (id: string) => void
+  onToggleRenderVisibility: (id: string) => void
   onMoveLayerUp: (id: string) => void
   onMoveLayerDown: (id: string) => void
   onGenerateMask: (id: string) => void
@@ -25,6 +26,7 @@ export function MaskLayersPanel({
   onRemoveLayer,
   onRenameLayer,
   onToggleVisibility,
+  onToggleRenderVisibility,
   onMoveLayerUp,
   onMoveLayerDown,
   onGenerateMask,
@@ -128,10 +130,26 @@ export function MaskLayersPanel({
                   <button
                     type="button"
                     className="mask-layers-panel__action"
-                    title={layer.visible ? 'Hide layer' : 'Show layer'}
+                    title={layer.visible ? 'Hide mask strokes' : 'Show mask strokes'}
                     onClick={() => onToggleVisibility(layer.id)}
                   >
                     {layer.visible ? <Eye size={13} strokeWidth={2} /> : <EyeOff size={13} strokeWidth={2} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="mask-layers-panel__action"
+                    title={
+                      layer.render_visible !== false
+                        ? 'Hide render on canvas'
+                        : 'Show render on canvas'
+                    }
+                    onClick={() => onToggleRenderVisibility(layer.id)}
+                  >
+                    {layer.render_visible !== false ? (
+                      <Image size={13} strokeWidth={2} />
+                    ) : (
+                      <ImageOff size={13} strokeWidth={2} />
+                    )}
                   </button>
                   <button
                     type="button"
