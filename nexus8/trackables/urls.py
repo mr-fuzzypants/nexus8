@@ -70,7 +70,7 @@ from .views_inpaint import MaskInpaintStatusView, MaskInpaintTriggerView
 from .views_scribble import ScribbleDraftView, ScribbleStatusView, ScribbleTriggerView
 from .views_erase import EraseImageStatusView, EraseImageTriggerView
 from .views_sketch_inpaint import SketchInpaintStatusView, SketchInpaintTriggerView
-from .views_renders import LayerRenderGridView, LayerRenderSelectView
+from .views_renders import LayerRenderGridView, LayerRenderSelectView, LayerSelectedRendersView
 from .views_workflow import WorkflowDetailView, WorkflowRegisterView
 from .views_runs import (
     AssetProvenanceView,
@@ -128,6 +128,7 @@ urlpatterns = [
     path('api/library/assets/<int:pk>/sketch-inpaint/status/', SketchInpaintStatusView.as_view(), name='library-asset-sketch-inpaint-status'),
     path('api/library/assets/<int:pk>/renders/', LayerRenderGridView.as_view(), name='library-asset-renders'),
     path('api/library/assets/<int:pk>/renders/select/', LayerRenderSelectView.as_view(), name='library-asset-renders-select'),
+    path('api/library/assets/<int:pk>/renders/selected/', LayerSelectedRendersView.as_view(), name='library-asset-renders-selected'),
     path('api/library/assets/<int:pk>/mask/', MaskSaveView.as_view(), name='library-asset-mask'),
     path('api/library/assets/<int:pk>/masks/', AssetMasksView.as_view(), name='library-asset-masks'),
     path('api/library/annotations/', AnnotationDocListCreateView.as_view(), name='library-annotations'),

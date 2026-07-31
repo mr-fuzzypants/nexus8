@@ -160,6 +160,13 @@ def store_run_results(
         relation.entity_version_number = versions[0].version_number
         relation.save(update_fields=["entity_version", "entity_version_number", "updated_at"])
 
+        # First-ever render for the layer: pin it so the layer composites on
+        # the canvas immediately. Later runs never move an existing selection.
+        if not Symlink.objects.filter(
+            entity=render_asset, name=SELECTED_SYMLINK
+        ).exists():
+            update_symlink(render_asset, SELECTED_SYMLINK, versions[0], actor=created_by)
+
     return render_asset, run, versions
 
 
@@ -188,6 +195,40 @@ def selected_render(render_asset):
         entity=render_asset, name=SELECTED_SYMLINK
     ).select_related("version").first()
     return link.version if link else None
+
+
+def selected_renders_for_source(source):
+    """
+    Every layer's pinned render for this source, one entry per layer_render
+    relation with a ``selected`` symlink — the canvas compositor's input.
+    Entered via the FK-indexed relation edge (F12), one Symlink query total.
+    """
+    relations = {
+        relation.entity_id: relation
+        for relation in EntityRelation.objects.filter(asset=source, role=RENDER_ROLE)
+    }
+    if not relations:
+        return []
+    results = []
+    links = Symlink.objects.filter(
+        entity_id__in=relations.keys(), name=SELECTED_SYMLINK
+    ).select_related("version")
+    for link in links:
+        layer_id = relations[link.entity_id].type_data.get("layer_id")
+        if not layer_id:
+            continue
+        version = link.version
+        results.append(
+            {
+                "layer_id": layer_id,
+                "version_number": version.version_number,
+                "variation_number": version.variation_number,
+                "file_path": version.data.get("file_path"),
+                "thumbnails": version.data.get("thumbnails"),
+                "generation": version.data.get("generation"),
+            }
+        )
+    return results
 
 
 def render_grid(render_asset):

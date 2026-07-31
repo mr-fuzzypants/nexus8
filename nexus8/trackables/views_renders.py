@@ -4,6 +4,7 @@ LAYER_RENDER_SCHEMA.md).
 
   GET  /api/library/assets/<id>/renders/?layer_id=…   contact sheet: runs × variations
   POST /api/library/assets/<id>/renders/select/       pin the chosen render
+  GET  /api/library/assets/<id>/renders/selected/     every layer's pinned render
 """
 
 import logging
@@ -51,6 +52,14 @@ class LayerRenderGridView(APIView):
                 "runs": layer_renders.render_grid(render_asset),
             }
         )
+
+
+class LayerSelectedRendersView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, pk):
+        source = get_object_or_404(MediaAsset.objects, pk=pk)
+        return Response({"selected": layer_renders.selected_renders_for_source(source)})
 
 
 class LayerRenderSelectView(APIView):
