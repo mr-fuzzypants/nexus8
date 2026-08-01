@@ -68,6 +68,19 @@ MIDDLEWARE = [
     'silk.middleware.SilkyMiddleware',
 ]
 
+# OPTIMIZATION (relations-graph profiling, Aug 2026): silk's request/query
+# recording costs more than the endpoints it measures — ~35 bookkeeping
+# queries and >100ms per intercepted request, vs ~12ms of actual work for a
+# relations-graph hop. Skip the chatty interactive graph endpoint; remove it
+# from this list temporarily when you want to profile it with silk.
+SILKY_IGNORE_PATHS = [
+    '/trackables/api/relations-graph/',
+]
+
+
+def SILKY_INTERCEPT_FUNC(request):  # noqa: N802 (silk expects this name)
+    return request.path not in SILKY_IGNORE_PATHS
+
 ROOT_URLCONF = 'nexus8.urls'
 
 TEMPLATES = [

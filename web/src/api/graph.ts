@@ -11,6 +11,8 @@ export interface GraphNode {
   entity_name: string;
   entity_type: string;
   version_number: number;
+  /** Small image proxy (256px rendition) for media versions, or null. */
+  thumb: string | null;
   /** Direct neighbours in the queried direction (for "expand +N" affordance). */
   child_count: number;
 }

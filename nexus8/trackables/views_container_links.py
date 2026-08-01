@@ -10,6 +10,7 @@ from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import DependencyLink, Version
+from .views_relations_graph import version_thumb
 from .serializers_container_links import (
     DependencyLinkSerializer,
     DependencyLinkMinimalSerializer,
@@ -303,6 +304,7 @@ class DependencyLinkViewSet(viewsets.ModelViewSet):
                 "entity_name": v.entity.name,
                 "entity_type": v.entity.entity_type,
                 "version_number": v.version_number,
+                "thumb": version_thumb(v),
                 "child_count": _child_count(v.id),
             }
             for v in versions

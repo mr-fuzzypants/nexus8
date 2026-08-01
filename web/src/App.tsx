@@ -12,6 +12,7 @@ import { ProjectPage } from './features/projects/ProjectPage';
 import { ProjectProvider } from './features/projects/ProjectContext';
 import { LandingOrRedirect } from './components/LandingOrRedirect';
 import { GraphPage } from './features/graph/GraphPage';
+import { RelationsGraphPage } from './features/graph/RelationsGraphPage';
 import { FavoritesPage } from './pages/FavoritesPage';
 import { RecentPage } from './pages/RecentPage';
 import { StubPage } from './pages/StubPage';
@@ -46,6 +47,7 @@ export default function App() {
                 <Route path="/entities" component={EntitiesPage} />
                 <Route path="/entities/:id" component={EntityPage} />
                 <Route path="/graph/:versionId" component={GraphPage} />
+                <Route path="/relations/:nodeId" component={RelationsGraphPage} />
                 <Route path="/favorites" component={FavoritesPage} />
                 <Route path="/recent" component={RecentPage} />
                 <Route>

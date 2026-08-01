@@ -15,6 +15,7 @@ export function GraphPage() {
       <DependencyGraph
         versionId={versionId}
         onOpenEntity={(entityId) => navigate(`/entities/${entityId}`)}
+        onOpenRelations={(vid) => navigate(`/relations/v${vid}`)}
         onBack={() => window.history.back()}
       />
     </div>

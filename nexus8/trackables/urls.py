@@ -66,6 +66,7 @@ from .views_projects import (
     ProjectListView,
 )
 from .views_blob import BlobResolveView, BlobStatView
+from .views_relations_graph import RelationsGraphView
 from .views_inpaint import MaskInpaintStatusView, MaskInpaintTriggerView
 from .views_scribble import ScribbleDraftView, ScribbleStatusView, ScribbleTriggerView
 from .views_erase import EraseImageStatusView, EraseImageTriggerView
@@ -149,6 +150,8 @@ urlpatterns = [
     path('api/library/root-entities/', RootEntitiesView.as_view(), name='library-root-entities'),
     path('api/library/smart-collections/', SmartCollectionListView.as_view(), name='library-smart-collections'),
     path('api/library/smart-collections/<int:pk>/', SmartCollectionDetailView.as_view(), name='library-smart-collection'),
+    # Unified relations graph (dependencies + attachments + lineage + pointers)
+    path('api/relations-graph/', RelationsGraphView.as_view(), name='relations-graph'),
     # Blob resolution for external engines (nodegraph nexus8:// driver)
     path('api/blob/resolve/', BlobResolveView.as_view(), name='blob-resolve'),
     path('api/blob/stat/', BlobStatView.as_view(), name='blob-stat'),
