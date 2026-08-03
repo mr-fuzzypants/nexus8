@@ -1,0 +1,129 @@
+.mask-track-timeline {
+  border-top: 1px solid var(--color-border, #e5e7eb);
+  background: var(--color-bg-subtle, #f9fafb);
+  font-size: 0.875rem;
+}
+
+/* Span selection controls */
+.mask-track-timeline__span-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border, #e5e7eb);
+}
+
+.mask-track-timeline__span-controls button {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border, #d1d5db);
+  border-radius: 4px;
+  background: var(--color-bg, #ffffff);
+  color: #1f2937;
+  cursor: pointer;
+}
+
+.mask-track-timeline__span-controls button:hover {
+  border-color: #6366f1;
+  color: #6366f1;
+}
+
+.mask-track-timeline__span-label {
+  font-size: 0.75rem;
+  color: var(--color-text-subtle, #6b7280);
+  margin-left: auto;
+}
+
+/* Span overlay band across a lane */
+.mask-track-timeline__span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(99, 102, 241, 0.12);
+  border-left: 2px solid #6366f1;
+  border-right: 2px solid #6366f1;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.mask-track-timeline__lane {
+  display: flex;
+  height: 32px;
+  align-items: stretch;
+  border-bottom: 1px solid var(--color-border, #e5e7eb);
+}
+
+.mask-track-timeline__lane-label {
+  flex: 0 0 120px;
+  padding: 6px 8px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid var(--color-border, #e5e7eb);
+  display: flex;
+  align-items: center;
+}
+
+.mask-track-timeline__lane-content {
+  flex: 1;
+  position: relative;
+  cursor: pointer;
+  background: var(--color-bg, #ffffff);
+  overflow: hidden;
+}
+
+/* Segment bars */
+.mask-track-timeline__bar {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 6px;
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.mask-track-timeline__bar--propagated {
+  background: #06b6d4;
+  opacity: 0.8;
+}
+
+.mask-track-timeline__bar--low-confidence {
+  background: #fbbf24;
+  opacity: 0.5;
+}
+
+/* Keyframe diamond markers */
+.mask-track-timeline__keyframe {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: none;
+  color: #1f2937;
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  z-index: 2;
+  transition: color 0.15s;
+}
+
+.mask-track-timeline__keyframe:hover {
+  color: #6366f1;
+}
+
+/* Playhead line */
+.mask-track-timeline__playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #ef4444;
+  pointer-events: none;
+  z-index: 3;
+  transform: translateX(-50%);
+}

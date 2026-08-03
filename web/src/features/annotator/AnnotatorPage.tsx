@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useLocation, useSearch } from 'wouter'
 import { useQuery } from '@tanstack/react-query'
 import * as Y from 'yjs'
@@ -9,6 +9,7 @@ import {
   DEFAULT_FREEHAND_PIPELINE_OPTIONS,
   type FreehandPipelineOptions,
 } from './core/annotations/freehandPipeline'
+import { framePointToWorld } from './core/annotations/geometry'
 import type {
   AnnotationDocumentSnapshot,
   AnnotationEntity,
@@ -37,6 +38,7 @@ import {
   type AnnotationDoc,
 } from './annotatorApi'
 import { getVersionHistory } from '../../api/versions'
+import { propagateMaskTrack, getMaskTrackStatus, listMaskTracks } from '../../api/videoMasks'
 import { isMaskShape, rasterizeMask, rasterizeScribble, rasterizeSketchInpaintGuide } from './rasterizeMask'
 import { computeMaskBounds } from './maskBounds'
 import { MaskLayersPanel } from './components/MaskLayersPanel'
@@ -214,6 +216,36 @@ function AnnotatorWorkspace({
   const [annotatorMode, setAnnotatorMode] = useState<'annotate' | 'mask'>('annotate')
   const [activeMaskLayerId, setActiveMaskLayerId] = useState<string | null>(null)
   const [maskGenerateState, setMaskGenerateState] = useState<Record<string, 'idle' | 'working' | string>>({})
+  // Per-layer keyframes (frame indices where user drew a mask stroke) and propagated segments.
+  // Keyframes are added when onMaskStrokeCommitted fires with a frameIndex on video.
+  // Segments are set after propagation completes (mock or real).
+  const [maskTrackKeyframes, setMaskTrackKeyframes] = useState<Record<string, number[]>>({})
+  const [maskTrackSegments, setMaskTrackSegments] = useState<Record<string, Array<{startFrame: number; endFrame: number; type: 'propagated' | 'lowConfidence'}>>>({})
+  // User-selected propagation span (absolute frame indices). null → backend
+  // auto-scopes. Persisted per-asset in localStorage so it survives reloads.
+  const [maskSpan, setMaskSpan] = useState<{ start: number; end: number } | null>(() => {
+    try {
+      const raw = localStorage.getItem(`nexus8.maskSpan.${asset.id}`)
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      return typeof parsed?.start === 'number' && typeof parsed?.end === 'number' ? parsed : null
+    } catch {
+      return null
+    }
+  })
+  useEffect(() => {
+    try {
+      const key = `nexus8.maskSpan.${asset.id}`
+      if (maskSpan) localStorage.setItem(key, JSON.stringify(maskSpan))
+      else localStorage.removeItem(key)
+    } catch {
+      // Storage unavailable (private mode etc.) — span stays session-only.
+    }
+  }, [maskSpan, asset.id])
+  // Layers with a propagated mask track; `version` bumps per re-propagation to bust the image cache.
+  const [videoMaskTracks, setVideoMaskTracks] = useState<Record<string, { version: number }>>({})
+  // Guards the one-time mask-track seeding per asset (see rehydration effect below).
+  const maskSeededRef = useRef<string | null>(null)
   // Sidebar tab below the layers list: parameter controls vs render history.
   const [sidebarTab, setSidebarTab] = useState<'params' | 'history'>('params')
   const [previewMode, setPreviewMode] = useState(false)
@@ -242,6 +274,8 @@ function AnnotatorWorkspace({
   const [liveVariantIndex, setLiveVariantIndex] = useState(0)
   const liveDebounceRef = useRef<number | null>(null)
   const livePollTimerRef = useRef<number | null>(null)
+  // AbortController for the currently in-flight mask propagation job (one at a time).
+  const propagationAbortRef = useRef<AbortController | null>(null)
   // Object URL of the current draft preview — revoked when the next draft replaces it.
   const draftUrlRef = useRef<string | null>(null)
   // Monotonic generation counter: bumping it aborts in-flight debounce/poll work
@@ -379,6 +413,7 @@ function AnnotatorWorkspace({
     () => () => {
       if (liveDebounceRef.current != null) window.clearTimeout(liveDebounceRef.current)
       if (livePollTimerRef.current != null) window.clearTimeout(livePollTimerRef.current)
+      propagationAbortRef.current?.abort()
     },
     [],
   )
@@ -432,6 +467,94 @@ function AnnotatorWorkspace({
       setSnapshot(null)
     }
   }, [asset, doc.room_id, doc.doc_state, profile])
+
+  // Rehydrate mask layers + timeline from the video's persisted TRACKS on load.
+  // Layer ids in the Yjs doc churn across sessions, so a track keyed by an old
+  // layer id would orphan. Anchoring on the track list (the durable source of
+  // truth) lets us restore the layer if the doc lost it, then repopulate the
+  // keyframe diamonds / propagated bar / mask overlay. Runs once per asset.
+  // Declared BEFORE the early return below so hook order stays stable.
+  useEffect(() => {
+    if (!isVideo || !engine) return
+    if (maskSeededRef.current === String(asset.id)) return
+    maskSeededRef.current = String(asset.id)
+    let cancelled = false
+    void (async () => {
+      try {
+        const tracks = await listMaskTracks(asset.id)
+        if (cancelled || tracks.length === 0) return
+        const store = engine.room.store
+        const existingById = new Map(store.getSnapshot().layers.map((l) => [l.id, l]))
+        tracks.forEach((t, i) => {
+          const existing = existingById.get(t.layer_id)
+          if (!existing) {
+            // The doc lost this layer — restore it so its strokes, timeline
+            // markers and mask overlay reattach.
+            store.upsertLayer({
+              id: t.layer_id,
+              name: t.layer_name || `Mask ${i + 1}`,
+              visible: true,
+              supportedSpaces: ['image2d'],
+              color: t.layer_color || MASK_LAYER_COLORS[i % MASK_LAYER_COLORS.length],
+              order: i,
+            })
+          } else if (!existing.visible) {
+            // Layer survived but was hidden (selection hides non-active layers);
+            // a layer with a persisted track must be visible to show its masks.
+            store.upsertLayer({ ...existing, visible: true })
+          }
+          setMaskTrackKeyframes((prev) => {
+            const merged = new Set([...(prev[t.layer_id] ?? []), ...t.keyframes])
+            return { ...prev, [t.layer_id]: Array.from(merged).sort((a, b) => a - b) }
+          })
+          setMaskTrackSegments((prev) => ({
+            ...prev,
+            [t.layer_id]: [{ startFrame: t.span_start, endFrame: t.span_end, type: 'propagated' as const }],
+          }))
+          setVideoMaskTracks((prev) => ({
+            ...prev,
+            [t.layer_id]: { version: prev[t.layer_id]?.version ?? 1 },
+          }))
+        })
+        // Focus a track layer so it stays visible (mask-mode selection hides
+        // non-active layers). Keep the current active layer if it already has a
+        // track; otherwise focus the first restored track layer.
+        setActiveMaskLayerId((cur) =>
+          cur && tracks.some((t) => t.layer_id === cur) ? cur : tracks[0].layer_id,
+        )
+      } catch {
+        // No tracks for this video, or endpoint unreachable — leave timeline empty.
+      }
+    })()
+    return () => { cancelled = true }
+  }, [asset.id, isVideo, engine])
+
+  // Keyframe diamonds derived from the PERSISTED strokes in the Yjs doc, so
+  // drawn-but-not-yet-propagated masks keep their timeline markers across
+  // reloads (onMaskStrokeCommitted state is session-only). Merged with the
+  // track-derived keyframes below. Declared before the early return (hooks).
+  const drawnMaskKeyframes = useMemo(() => {
+    if (!isVideo || !snapshot) return {} as Record<string, number[]>
+    const byLayer: Record<string, Set<number>> = {}
+    for (const ann of snapshot.annotations) {
+      if (!ann.maskRegion) continue
+      const frame = ann.frame?.mediaBinding?.frame
+      if (typeof frame !== 'number') continue
+      ;(byLayer[ann.layerId] ??= new Set()).add(frame)
+    }
+    return Object.fromEntries(
+      Object.entries(byLayer).map(([id, frames]) => [id, Array.from(frames).sort((a, b) => a - b)]),
+    )
+  }, [isVideo, snapshot])
+
+  const mergedMaskKeyframes = useMemo(() => {
+    const out: Record<string, number[]> = { ...maskTrackKeyframes }
+    for (const [layerId, frames] of Object.entries(drawnMaskKeyframes)) {
+      const merged = new Set([...(out[layerId] ?? []), ...frames])
+      out[layerId] = Array.from(merged).sort((a, b) => a - b)
+    }
+    return out
+  }, [maskTrackKeyframes, drawnMaskKeyframes])
 
   if (!engine || !snapshot) {
     return (
@@ -521,6 +644,8 @@ function AnnotatorWorkspace({
       const remaining = maskLayers.filter((l) => l.id !== id)
       setActiveMaskLayerId(remaining.length > 0 ? remaining[0].id : null)
     }
+    setMaskTrackKeyframes(({ [id]: _, ...rest }) => rest)
+    setMaskTrackSegments(({ [id]: _, ...rest }) => rest)
   }
 
   function handleRenameMaskLayer(id: string, name: string) {
@@ -667,6 +792,142 @@ function AnnotatorWorkspace({
     }
   }
 
+  /** Extract per-frame click prompts from mask brush strokes stored in the Yjs doc.
+   *  Reads live annotation state so it works even after page reload. */
+  function buildPromptFrames(layerId: string, annotations: AnnotationEntity[]) {
+    const byFrame = new Map<number, Array<{ x: number; y: number; positive: boolean }>>()
+    for (const ann of annotations) {
+      if (!ann.maskRegion || ann.layerId !== layerId) continue
+      const frameIndex = ann.frame.mediaBinding?.frame
+      if (typeof frameIndex !== 'number') continue
+      const geom = ann.geometry
+      if (geom.kind !== 'brush' && geom.kind !== 'freehand' && geom.kind !== 'polygon') continue
+      const pts = geom.points
+      if (pts.length === 0) continue
+      // Geometry points are FRAME-LOCAL offsets from the stroke's anchor, not
+      // absolute image coords — convert via framePointToWorld (same as
+      // computeMaskBounds) or every click collapses to the image's top-left.
+      const worldPts = pts.map((p) => framePointToWorld(ann.frame, p))
+      const existing = byFrame.get(frameIndex) ?? []
+      if (geom.kind === 'polygon') {
+        // Polygon vertices sit on the boundary; the centroid is the best
+        // interior guess (imperfect for concave shapes).
+        const cx = worldPts.reduce((s, p) => s + p.x, 0) / worldPts.length
+        const cy = worldPts.reduce((s, p) => s + p.y, 0) / worldPts.length
+        existing.push({ x: cx, y: cy, positive: true })
+      } else {
+        // Brush/freehand points are ON the painted object; sample up to 3
+        // evenly along the stroke. (The centroid of a curved stroke can fall
+        // OFF the object — e.g. a C-shaped stroke around a torso.)
+        const sampleCount = Math.min(3, worldPts.length)
+        for (let i = 0; i < sampleCount; i++) {
+          const p = worldPts[Math.floor((i * (worldPts.length - 1)) / Math.max(sampleCount - 1, 1))]
+          existing.push({ x: p.x, y: p.y, positive: true })
+        }
+      }
+      byFrame.set(frameIndex, existing)
+    }
+    return Array.from(byFrame.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([frame_index, clicks]) => ({ frame_index, type: 'click' as const, clicks }))
+  }
+
+  async function handlePropagateMaskTrack(layerId: string) {
+    // Cancel any previous in-flight propagation.
+    propagationAbortRef.current?.abort()
+    const abort = new AbortController()
+    propagationAbortRef.current = abort
+
+    setMaskGenerateState((s) => ({ ...s, [layerId]: 'working' }))
+
+    try {
+      const promptFrames = buildPromptFrames(layerId, snapshot.annotations)
+
+      if (promptFrames.length === 0) {
+        setMaskGenerateState((s) => ({ ...s, [layerId]: 'Draw a mask first' }))
+        window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
+        return
+      }
+
+      // Dispatch to Django → Modal SAM 2. Send the user-selected span if any;
+      // otherwise the backend auto-scopes a window around the earliest prompt.
+      const propagatedLayer = maskLayers.find((l) => l.id === layerId)
+      const dispatched = await propagateMaskTrack(asset.id, layerId, {
+        prompt_frames: promptFrames,
+        propagation_params: maskSpan
+          ? { span_start: maskSpan.start, span_end: maskSpan.end }
+          : { full_clip: true },
+        layer_name: propagatedLayer?.name,
+        layer_color: propagatedLayer?.color,
+        source_size: imageDims ?? undefined,
+      })
+      if (abort.signal.aborted) return
+
+      const dispatchAt = dispatched.dispatch_at_ms ?? Date.now()
+      const spanStart = dispatched.span_start ?? maskSpan?.start ?? 0
+
+      // Poll until done. Prefer the backend's phase string (e.g. "Segmenting… 12s"),
+      // falling back to a locally-computed elapsed counter.
+      const result = await new Promise<typeof dispatched & { version_id?: string; frames_processed?: number; latency_s?: number }>(
+        (resolve, reject) => {
+          const poll = async () => {
+            if (abort.signal.aborted) { reject(new Error('Cancelled')); return }
+            try {
+              const status = await getMaskTrackStatus(asset.id, layerId, dispatched.call_id, dispatchAt, spanStart)
+              if (status.status === 'done') {
+                resolve({ ...dispatched, ...status })
+              } else if (status.status === 'failed') {
+                reject(new Error(status.error ?? 'Propagation failed'))
+              } else {
+                const elapsed = Math.round((Date.now() - dispatchAt) / 1000)
+                const label = status.progress ?? `${elapsed}s…`
+                setMaskGenerateState((s) => ({ ...s, [layerId]: label }))
+                window.setTimeout(poll, 2000)
+              }
+            } catch (err) {
+              reject(err)
+            }
+          }
+          void poll()
+        },
+      )
+
+      if (abort.signal.aborted) return
+
+      // Update timeline: propagated segment spans the processed window, plus
+      // keyframes from the prompt frames.
+      const totalFrames = asset.nb_frames ?? (asset.fps && asset.duration ? Math.round(asset.fps * asset.duration) : 240)
+      const segStart = dispatched.span_start ?? maskSpan?.start ?? 0
+      const segEnd = dispatched.span_end ?? maskSpan?.end ?? totalFrames - 1
+      const promptedFrameIndices = promptFrames.map((pf) => pf.frame_index)
+      setMaskTrackKeyframes((prev) => {
+        const merged = new Set([...(prev[layerId] ?? []), ...promptedFrameIndices])
+        return { ...prev, [layerId]: Array.from(merged).sort((a, b) => a - b) }
+      })
+      setMaskTrackSegments((prev) => ({
+        ...prev,
+        [layerId]: [{ startFrame: segStart, endFrame: segEnd, type: 'propagated' as const }],
+      }))
+      // Enable per-frame mask overlay for this layer; bump version to invalidate
+      // any cached mask images from a prior propagation.
+      setVideoMaskTracks((prev) => ({
+        ...prev,
+        [layerId]: { version: (prev[layerId]?.version ?? 0) + 1 },
+      }))
+
+      const latencyStr = result.latency_s != null ? ` · ${result.latency_s.toFixed(0)}s` : ''
+      const frameStr = result.frames_processed != null ? `${result.frames_processed} frames` : 'Done'
+      setMaskGenerateState((s) => ({ ...s, [layerId]: `${frameStr}${latencyStr}` }))
+      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 3000)
+
+    } catch (error) {
+      if (abort.signal.aborted) return
+      const message = error instanceof Error ? error.message : 'Failed'
+      setMaskGenerateState((s) => ({ ...s, [layerId]: message }))
+      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 3000)
+    }
+  }
+
   /** Dispatch the layer's mask_op to its generation runner. No-op when the op
    *  is unrunnable or a required prompt is missing. Shared by live stroke-commit
    *  generation and the explicit Regenerate button. */
@@ -690,7 +951,15 @@ function AnnotatorWorkspace({
     else if (op === 'remove') void runEraseGeneration(layerId)
   }
 
-  function handleMaskStrokeCommitted(layerId: string) {
+  function handleMaskStrokeCommitted(layerId: string, frameIndex?: number) {
+    // Track which video frames have been drawn on (for the track timeline).
+    if (typeof frameIndex === 'number') {
+      setMaskTrackKeyframes((prev) => {
+        const existing = prev[layerId] ?? []
+        if (existing.includes(frameIndex)) return prev
+        return { ...prev, [layerId]: [...existing, frameIndex].sort((a, b) => a - b) }
+      })
+    }
     if (!liveGenEnabled || layerId !== activeMaskLayerId) {
       return
     }
@@ -1261,8 +1530,16 @@ function AnnotatorWorkspace({
           liveGenBusy={liveGenStatus.phase === 'saving' || liveGenStatus.phase === 'generating'}
           onMaskStrokeStarted={invalidateLiveGeneration}
           onMaskStrokeCommitted={handleMaskStrokeCommitted}
+          maskTrackKeyframes={mergedMaskKeyframes}
+          maskTrackSegments={maskTrackSegments}
+          assetId={asset.id}
+          videoMaskTracks={videoMaskTracks}
+          maskSpan={maskSpan}
+          onSetSpanIn={(frame) => setMaskSpan((s) => ({ start: frame, end: Math.max(frame, s?.end ?? frame) }))}
+          onSetSpanOut={(frame) => setMaskSpan((s) => ({ start: Math.min(frame, s?.start ?? frame), end: frame }))}
+          onClearSpan={() => setMaskSpan(null)}
         />
-        {annotatorMode === 'mask' && !isVideo && !is3DModel ? (
+        {annotatorMode === 'mask' && !is3DModel ? (
           <>
           <div
             className="annotator-page__mask-sidebar-resizer"
@@ -1274,6 +1551,7 @@ function AnnotatorWorkspace({
               layers={maskLayers}
               activeLayerId={activeMaskLayerId}
               maskGenerateState={maskGenerateState}
+              isVideo={isVideo}
               onSelectLayer={handleSelectMaskLayer}
               onAddLayer={handleAddMaskLayer}
               onRemoveLayer={handleRemoveMaskLayer}
@@ -1283,6 +1561,7 @@ function AnnotatorWorkspace({
               onMoveLayerUp={handleMoveMaskLayerUp}
               onMoveLayerDown={handleMoveMaskLayerDown}
               onGenerateMask={handleGenerateMaskForLayer}
+              onPropagateMask={handlePropagateMaskTrack}
             />
             {activeMaskLayerId ? (
               <div className="annotator-page__sidebar-tabs" role="tablist">

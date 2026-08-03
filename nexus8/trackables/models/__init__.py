@@ -94,6 +94,10 @@ from .workflows import (
     WorkflowAttachment,
     RunIntent,
 )
+from .mask_tracks import (
+    MaskTrack,
+    MaskTrackManager,
+)
 
 __all__ = [
     "AI_STATUS_CHOICES",
@@ -116,6 +120,8 @@ __all__ = [
     "GenerationRecipe",
     "ImageAnnotation",
     "LoraAdapter",
+    "MaskTrack",
+    "MaskTrackManager",
     "MediaAsset",
     "ModelCheckpoint",
     "NodegraphWorkflow",

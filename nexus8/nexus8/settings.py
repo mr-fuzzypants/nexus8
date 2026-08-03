@@ -33,6 +33,28 @@ DEBUG = os.environ.get('NEXUS8_DEBUG', '1') == '1'
 ALLOWED_HOSTS = os.environ.get('NEXUS8_ALLOWED_HOSTS', '*').split(',')
 
 
+# Logging — surface app INFO logs (e.g. mask-track propagation progress) on the
+# dev console. Django's default only shows WARNING+ for non-django loggers.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'simple': {'format': '%(asctime)s %(levelname)s %(name)s: %(message)s',
+                   'datefmt': '%H:%M:%S'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'simple'},
+    },
+    'loggers': {
+        'trackables': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
+
+
 # Application definition
 
 INSTALLED_APPS = [

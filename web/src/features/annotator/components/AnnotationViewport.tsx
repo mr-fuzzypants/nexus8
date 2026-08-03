@@ -41,6 +41,8 @@ import type { ViewerAdapter, ViewerSurfaceController, ViewportSize } from '../co
 import type { VideoViewerAdapter } from '../core/viewers/videoAdapter'
 import { isAnnotationVisibleAtPlaybackTime } from '../core/annotations/timeline'
 import { VideoTransport } from './VideoTransport'
+import { MaskTrackTimeline } from './MaskTrackTimeline'
+import { maskFrameUrl } from '../../../api/videoMasks'
 import { renderPrimitiveBatchesToCanvas } from '../core/rendering/canvasRenderer'
 import { buildAnnotationSceneRenderPlan } from '../core/rendering/renderService'
 import { buildAnnotationSpatialIndex } from '../core/rendering/spatialIndex'
@@ -121,7 +123,15 @@ interface ViewportProps {
   liveGenLatencyS?: number
   liveGenBusy?: boolean
   onMaskStrokeStarted?: () => void
-  onMaskStrokeCommitted?: (layerId: string) => void
+  onMaskStrokeCommitted?: (layerId: string, frameIndex?: number) => void
+  maskTrackKeyframes?: Record<string, number[]>
+  maskTrackSegments?: Record<string, Array<{ startFrame: number; endFrame: number; type: 'propagated' | 'lowConfidence' }>>
+  assetId?: number
+  videoMaskTracks?: Record<string, { version: number }>
+  maskSpan?: { start: number; end: number } | null
+  onSetSpanIn?: (frame: number) => void
+  onSetSpanOut?: (frame: number) => void
+  onClearSpan?: () => void
 }
 
 function hasBoundsGeometry(geometry: AnnotationGeometry): geometry is Extract<AnnotationGeometry, { start: Vec2; end: Vec2 }> {
@@ -203,11 +213,25 @@ export function AnnotationViewport({
   liveGenBusy = false,
   onMaskStrokeStarted,
   onMaskStrokeCommitted,
+  maskTrackKeyframes,
+  maskTrackSegments,
+  assetId,
+  videoMaskTracks,
+  maskSpan,
+  onSetSpanIn,
+  onSetSpanOut,
+  onClearSpan,
 }: ViewportProps) {
   const surfaceRef = useRef<HTMLDivElement>(null)
   const surfaceHostRef = useRef<HTMLDivElement>(null)
   const backgroundCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
+  // Per-frame video-mask overlay: cache of loaded mask images keyed by
+  // `${layerId}:${version}:${frame}`. 'loading'/'empty' are sentinels so we
+  // never re-request. maskTick forces an overlay redraw when a load resolves.
+  const maskImgCacheRef = useRef<Map<string, HTMLImageElement | 'loading' | 'empty'>>(new Map())
+  const maskTintCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const [maskTick, setMaskTick] = useState(0)
   // Dedicated layer for the generation-in-progress marching-ants border: the
   // main overlay only redraws on state changes, so the animation gets its own
   // canvas + rAF loop instead of forcing full scene redraws every frame.
@@ -475,8 +499,8 @@ export function AnnotationViewport({
   const diagnostics = adapter.getDiagnostics?.() ?? []
   const selectedAnnotationIsVisible = Boolean(selectedAnnotation && annotationMatchesViewer(selectedAnnotation, adapter))
   const viewerToolbarGroups = useMemo<ViewerToolbarGroup[]>(() => {
-    // Mask mode (brush/polygon) only applies to still images; video and 3D use annotate-only.
-    const isMaskCapable = adapter.space === 'image2d' && !videoAdapter
+    // Mask mode (brush/polygon) applies to image2d (still images and video).
+    const isMaskCapable = adapter.space === 'image2d'
 
     const modeGroup: ViewerToolbarGroup = {
       id: 'mode',
@@ -511,10 +535,10 @@ export function AnnotationViewport({
     let toolIds: ViewerToolbarToolId[]
     if (adapter.space !== 'image2d') {
       toolIds = ['select', 'freehand', 'rectangle', 'ellipse']
-    } else if (videoAdapter) {
-      toolIds = ['select', 'freehand', 'rectangle', 'ellipse', 'text', 'card']
     } else if (annotatorMode === 'mask') {
       toolIds = ['select', 'brush', 'polygon']
+    } else if (videoAdapter) {
+      toolIds = ['select', 'freehand', 'rectangle', 'ellipse', 'text', 'card']
     } else {
       toolIds = ['select', 'freehand', 'rectangle', 'ellipse', 'text', 'card']
     }
@@ -974,6 +998,69 @@ export function AnnotationViewport({
       }
     }
 
+    // Per-frame video mask overlay: draw each visible layer's SAM 2 mask for the
+    // current frame, tinted with the layer colour and mapped to the frame rect.
+    // This effect re-runs every frame (adapterVersion ticks on playback), and on
+    // maskTick when a lazily-loaded mask image resolves.
+    if (
+      videoAdapter && annotatorMode === 'mask' && maskLayers && imageDims &&
+      videoMaskTracks && assetId != null
+    ) {
+      const currentFrame = videoAdapter.getMediaState().currentFrame
+      const tl = adapter.worldToScreen({ x: 0, y: 0, z: 0 }, viewport)
+      const br = adapter.worldToScreen({ x: imageDims.width, y: imageDims.height, z: 0 }, viewport)
+      if (tl && br) {
+        const rect = {
+          x: Math.min(tl.x, br.x),
+          y: Math.min(tl.y, br.y),
+          w: Math.abs(br.x - tl.x),
+          h: Math.abs(br.y - tl.y),
+        }
+        for (const layer of maskLayers) {
+          const track = videoMaskTracks[layer.id]
+          if (!track || !layer.visible) continue
+
+          const key = `${layer.id}:${track.version}:${currentFrame}`
+          const cached = maskImgCacheRef.current.get(key)
+
+          if (cached === undefined) {
+            // Lazily fetch this frame's mask; redraw once it resolves.
+            maskImgCacheRef.current.set(key, 'loading')
+            const im = new Image()
+            im.onload = () => {
+              maskImgCacheRef.current.set(key, im.naturalWidth ? im : 'empty')
+              setMaskTick((t) => t + 1)
+            }
+            im.onerror = () => {
+              // 204 No Content (no mask for this frame) lands here.
+              maskImgCacheRef.current.set(key, 'empty')
+            }
+            im.src = maskFrameUrl(assetId, layer.id, currentFrame, track.version)
+            continue
+          }
+          if (cached === 'loading' || cached === 'empty') continue
+
+          // Colourise: fill the layer colour through the mask's alpha (source-in).
+          const tint = maskTintCanvasRef.current ?? (maskTintCanvasRef.current = document.createElement('canvas'))
+          tint.width = cached.naturalWidth
+          tint.height = cached.naturalHeight
+          const tctx = tint.getContext('2d')
+          if (!tctx) continue
+          tctx.clearRect(0, 0, tint.width, tint.height)
+          tctx.globalCompositeOperation = 'source-over'
+          tctx.drawImage(cached, 0, 0)
+          tctx.globalCompositeOperation = 'source-in'
+          tctx.fillStyle = layer.color || '#06b6d4'
+          tctx.fillRect(0, 0, tint.width, tint.height)
+
+          context.save()
+          context.globalAlpha = 0.45
+          context.drawImage(tint, rect.x, rect.y, rect.w, rect.h)
+          context.restore()
+        }
+      }
+    }
+
     // Brush cursor ring — drawn last so it always appears on top.
     if (activeTool === 'brush' && brushPointerPos && !draft) {
       context.save()
@@ -989,7 +1076,7 @@ export function AnnotationViewport({
       context.stroke()
       context.restore()
     }
-  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, layerRenders, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskPreviewMode, participants, projectionHost, refImageTick, selectedId, viewport, visibleAnnotations])
+  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, assetId, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, layerRenders, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskLayers, maskPreviewMode, maskTick, participants, projectionHost, refImageTick, selectedId, videoAdapter, videoMaskTracks, viewport, visibleAnnotations])
 
   // Marching-ants border while a generation is in flight. Runs on its own
   // canvas so the 60fps dash animation never triggers React re-renders or full
@@ -1202,7 +1289,8 @@ export function AnnotationViewport({
     // Single hook for the live-generation loop: covers brush pointer-up and
     // polygon double-click/Enter commits alike.
     if (annotation.maskRegion) {
-      onMaskStrokeCommitted?.(annotation.layerId)
+      const frameIndex = videoAdapter?.getMediaState().currentFrame
+      onMaskStrokeCommitted?.(annotation.layerId, frameIndex)
     }
   }
 
@@ -1894,7 +1982,35 @@ export function AnnotationViewport({
         />
         <canvas ref={genBusyCanvasRef} className="viewer-canvas viewer-canvas--gen-busy" />
       </div>
-      {videoAdapter ? <VideoTransport adapter={videoAdapter} /> : null}
+      {videoAdapter ? (
+        <>
+          <VideoTransport adapter={videoAdapter} />
+          {annotatorMode === 'mask' && maskLayers && maskLayers.length > 0 ? (
+            <MaskTrackTimeline
+              tracks={maskLayers.map((layer) => ({
+                layerId: layer.id,
+                layerName: layer.name || 'Untitled layer',
+                layerColor: layer.color || '#6366f1',
+                segments: maskTrackSegments?.[layer.id] ?? [],
+                keyframes: maskTrackKeyframes?.[layer.id] ?? [],
+              }))}
+              currentFrame={videoAdapter.getMediaState().currentFrame}
+              totalFrames={videoAdapter.getMediaState().duration ? Math.round(videoAdapter.getMediaState().duration * videoAdapter.getMediaState().frameRate) : 240}
+              span={maskSpan}
+              onSetSpanIn={() => onSetSpanIn?.(videoAdapter.getMediaState().currentFrame)}
+              onSetSpanOut={() => onSetSpanOut?.(videoAdapter.getMediaState().currentFrame)}
+              onClearSpan={onClearSpan}
+              onKeyframeClick={(_layerId, frame) => {
+                const totalFrames = videoAdapter.getMediaState().duration ? Math.round(videoAdapter.getMediaState().duration * videoAdapter.getMediaState().frameRate) : 1
+                videoAdapter.previewSeekToProgress(frame / totalFrames)
+              }}
+              onScrub={(progress) => {
+                videoAdapter.previewSeekToProgress(progress)
+              }}
+            />
+          ) : null}
+        </>
+      ) : null}
       <footer className="viewer-card__footer">
         <span>{adapter.space === 'image2d' ? 'Image-space anchors' : 'World-space anchors'}</span>
         {statusBadges.map((badge) => (

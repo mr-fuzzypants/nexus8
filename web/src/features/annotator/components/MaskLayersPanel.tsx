@@ -6,6 +6,7 @@ interface MaskLayersPanelProps {
   layers: AnnotationLayer[]
   activeLayerId: string | null
   maskGenerateState: Record<string, 'idle' | 'working' | string>
+  isVideo?: boolean
   onSelectLayer: (id: string) => void
   onAddLayer: () => void
   onRemoveLayer: (id: string) => void
@@ -15,12 +16,14 @@ interface MaskLayersPanelProps {
   onMoveLayerUp: (id: string) => void
   onMoveLayerDown: (id: string) => void
   onGenerateMask: (id: string) => void
+  onPropagateMask?: (id: string) => void
 }
 
 export function MaskLayersPanel({
   layers,
   activeLayerId,
   maskGenerateState,
+  isVideo,
   onSelectLayer,
   onAddLayer,
   onRemoveLayer,
@@ -30,6 +33,7 @@ export function MaskLayersPanel({
   onMoveLayerUp,
   onMoveLayerDown,
   onGenerateMask,
+  onPropagateMask,
 }: MaskLayersPanelProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingName, setEditingName] = useState('')
@@ -118,15 +122,28 @@ export function MaskLayersPanel({
 
                 {/* actions */}
                 <div className="mask-layers-panel__actions" onClick={(e) => e.stopPropagation()}>
-                  <button
-                    type="button"
-                    className="mask-layers-panel__action"
-                    title={generateState === 'working' ? 'Generating…' : generateState !== 'idle' ? generateState : 'Generate mask'}
-                    disabled={generateState === 'working'}
-                    onClick={() => onGenerateMask(layer.id)}
-                  >
-                    <Wand2 size={13} strokeWidth={2} />
-                  </button>
+                  {isVideo ? (
+                    <button
+                      type="button"
+                      className="mask-layers-panel__action"
+                      title={generateState === 'working' ? 'Propagating…' : generateState !== 'idle' ? generateState : 'Propagate mask track'}
+                      disabled={generateState === 'working'}
+                      onClick={() => onPropagateMask?.(layer.id)}
+                    >
+                      <Wand2 size={13} strokeWidth={2} />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="mask-layers-panel__action"
+                      title={generateState === 'working' ? 'Generating…' : generateState !== 'idle' ? generateState : 'Generate mask'}
+                      disabled={generateState === 'working'}
+                      onClick={() => onGenerateMask(layer.id)}
+                    >
+                      <Wand2 size={13} strokeWidth={2} />
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     className="mask-layers-panel__action"
