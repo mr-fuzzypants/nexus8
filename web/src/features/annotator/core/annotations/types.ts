@@ -64,6 +64,9 @@ export type AnnotationGeometry =
       points: Vec2[]
       /** Brush half-width in frame-local (image-pixel) units. */
       radius: number
+      /** True = negative prompt ("not this object") for SAM 2; drawn red.
+       *  Absent/false = positive. Only meaningful on mask-layer strokes. */
+      negative?: boolean
     }
   | {
       kind: 'polygon'

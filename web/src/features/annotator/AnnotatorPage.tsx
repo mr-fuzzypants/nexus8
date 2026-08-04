@@ -808,13 +808,15 @@ function AnnotatorWorkspace({
       // absolute image coords — convert via framePointToWorld (same as
       // computeMaskBounds) or every click collapses to the image's top-left.
       const worldPts = pts.map((p) => framePointToWorld(ann.frame, p))
+      // Negative (⌥/Alt) brush strokes are "not this object" hints (SAM label 0).
+      const positive = !(geom.kind === 'brush' && geom.negative)
       const existing = byFrame.get(frameIndex) ?? []
       if (geom.kind === 'polygon') {
         // Polygon vertices sit on the boundary; the centroid is the best
         // interior guess (imperfect for concave shapes).
         const cx = worldPts.reduce((s, p) => s + p.x, 0) / worldPts.length
         const cy = worldPts.reduce((s, p) => s + p.y, 0) / worldPts.length
-        existing.push({ x: cx, y: cy, positive: true })
+        existing.push({ x: cx, y: cy, positive })
       } else {
         // Brush/freehand points are ON the painted object; sample up to 3
         // evenly along the stroke. (The centroid of a curved stroke can fall
@@ -822,7 +824,7 @@ function AnnotatorWorkspace({
         const sampleCount = Math.min(3, worldPts.length)
         for (let i = 0; i < sampleCount; i++) {
           const p = worldPts[Math.floor((i * (worldPts.length - 1)) / Math.max(sampleCount - 1, 1))]
-          existing.push({ x: p.x, y: p.y, positive: true })
+          existing.push({ x: p.x, y: p.y, positive })
         }
       }
       byFrame.set(frameIndex, existing)

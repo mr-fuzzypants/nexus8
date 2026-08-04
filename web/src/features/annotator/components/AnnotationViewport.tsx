@@ -66,6 +66,9 @@ import {
 
 const LazyAnnotationMantineEditor = lazy(() => import('./AnnotationMantineEditor'))
 
+/** Negative (subtract) mask strokes render in this red regardless of layer colour. */
+const NEGATIVE_STROKE_COLOR = '#ef4444'
+
 type InlineEditableKind = 'text' | 'card' | 'list'
 type TextAnnotation = AnnotationEntity & { geometry: Extract<AnnotationGeometry, { kind: 'text' }> }
 type CardAnnotation = AnnotationEntity & { geometry: Extract<AnnotationGeometry, { kind: 'card' }> }
@@ -265,6 +268,8 @@ export function AnnotationViewport({
   const [isCardMoveGripHovered, setIsCardMoveGripHovered] = useState(false)
   const [brushScreenRadiusPx, setBrushScreenRadiusPx] = useState(18)
   const [brushPointerPos, setBrushPointerPos] = useState<{ x: number; y: number } | null>(null)
+  // ⌥/Alt held → next brush stroke is a negative prompt; drives the red cursor ring.
+  const [brushNegativeArmed, setBrushNegativeArmed] = useState(false)
   const size = useElementSize(surfaceRef)
 
   const viewport = useMemo<ViewportSize>(
@@ -775,6 +780,22 @@ export function AnnotationViewport({
     }
   }, [isSurfaceFocused])
 
+  // Flip the negative-brush cursor ring the instant ⌥/Alt is pressed/released,
+  // so the artist sees the polarity without having to move the pointer first.
+  useEffect(() => {
+    if (annotatorMode !== 'mask' || activeTool !== 'brush' || !videoAdapter) {
+      setBrushNegativeArmed(false)
+      return
+    }
+    const sync = (event: KeyboardEvent) => setBrushNegativeArmed(event.altKey)
+    window.addEventListener('keydown', sync)
+    window.addEventListener('keyup', sync)
+    return () => {
+      window.removeEventListener('keydown', sync)
+      window.removeEventListener('keyup', sync)
+    }
+  }, [annotatorMode, activeTool, videoAdapter])
+
   useEffect(() => {
     const surface = surfaceRef.current
     const handleAdapterWheel = adapter.handleWheel
@@ -1063,20 +1084,31 @@ export function AnnotationViewport({
 
     // Brush cursor ring — drawn last so it always appears on top.
     if (activeTool === 'brush' && brushPointerPos && !draft) {
+      // Red ring while ⌥/Alt arms a negative stroke; white otherwise.
+      const armed = brushNegativeArmed
       context.save()
       context.beginPath()
       context.arc(brushPointerPos.x, brushPointerPos.y, brushScreenRadiusPx, 0, Math.PI * 2)
-      context.strokeStyle = 'rgba(255,255,255,0.9)'
-      context.lineWidth = 1.5
+      context.strokeStyle = armed ? NEGATIVE_STROKE_COLOR : 'rgba(255,255,255,0.9)'
+      context.lineWidth = armed ? 2 : 1.5
       context.stroke()
       context.beginPath()
       context.arc(brushPointerPos.x, brushPointerPos.y, brushScreenRadiusPx, 0, Math.PI * 2)
       context.strokeStyle = 'rgba(0,0,0,0.5)'
       context.lineWidth = 0.75
       context.stroke()
+      if (armed) {
+        // Minus glyph inside the ring — unambiguous "subtract" affordance.
+        context.beginPath()
+        context.moveTo(brushPointerPos.x - brushScreenRadiusPx * 0.4, brushPointerPos.y)
+        context.lineTo(brushPointerPos.x + brushScreenRadiusPx * 0.4, brushPointerPos.y)
+        context.strokeStyle = NEGATIVE_STROKE_COLOR
+        context.lineWidth = 2
+        context.stroke()
+      }
       context.restore()
     }
-  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, assetId, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, layerRenders, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskLayers, maskPreviewMode, maskTick, participants, projectionHost, refImageTick, selectedId, videoAdapter, videoMaskTracks, viewport, visibleAnnotations])
+  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, assetId, brushNegativeArmed, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, layerRenders, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskLayers, maskPreviewMode, maskTick, participants, projectionHost, refImageTick, selectedId, videoAdapter, videoMaskTracks, viewport, visibleAnnotations])
 
   // Marching-ants border while a generation is in flight. Runs on its own
   // canvas so the 60fps dash animation never triggers React re-renders or full
@@ -1151,7 +1183,7 @@ export function AnnotationViewport({
     return pixels > 1e-6 ? pixels : 1
   }
 
-  function beginDraft(tool: Exclude<AnnotationTool, 'select' | 'text'>, screenPoint: Vec2, timestamp: number) {
+  function beginDraft(tool: Exclude<AnnotationTool, 'select' | 'text'>, screenPoint: Vec2, timestamp: number, altKey = false) {
     const worldPoint = adapter.screenToWorld(screenPoint, viewport)
     if (!worldPoint) {
       return null
@@ -1191,6 +1223,10 @@ export function AnnotationViewport({
       const pipeline = new FreehandStrokePipeline(freehandPipelineOptions, coordinateScale)
       freehandPipelineRef.current = pipeline
       const initialPoints = pipeline.addPoint({ x: 0, y: 0, timestamp })
+      // ⌥/Alt while drawing on a mask layer = negative prompt ("not this"),
+      // rendered red. Only meaningful in mask mode.
+      const negative = altKey && annotatorMode === 'mask' && !!videoAdapter
+      const strokeColor = negative ? NEGATIVE_STROKE_COLOR : authorColor
       return {
         id: crypto.randomUUID(),
         layerId: activeMaskLayerId ?? DEFAULT_LAYER_ID,
@@ -1199,10 +1235,11 @@ export function AnnotationViewport({
           kind: 'brush',
           points: initialPoints.length > 0 ? initialPoints : [{ x: 0, y: 0 }],
           radius: brushScreenRadiusPx / getFrameScale(frame),
+          ...(negative ? { negative: true } : {}),
         },
         style: {
-          stroke: authorColor,
-          fill: `${authorColor}55`,
+          stroke: strokeColor,
+          fill: `${strokeColor}55`,
           strokeWidth: 2,
           opacity: 0.85,
           fontSize: 15,
@@ -1368,12 +1405,17 @@ export function AnnotationViewport({
 
     event.currentTarget.setPointerCapture(event.pointerId)
 
+    // With the brush active in mask mode, ⌥/Alt means "negative stroke", not
+    // pan — so hide altKey from the navigation check (which pans on Alt). Pan
+    // stays available via middle-mouse or the select tool.
+    const brushClaimsAlt =
+      annotatorMode === 'mask' && activeTool === 'brush' && event.button === 0 && !!videoAdapter
     if (
       adapter.beginNavigation?.(
         screenPoint,
         {
           button: event.button,
-          altKey: event.altKey,
+          altKey: event.altKey && !brushClaimsAlt,
           ctrlKey: event.ctrlKey,
           metaKey: event.metaKey,
           shiftKey: event.shiftKey,
@@ -1522,7 +1564,7 @@ export function AnnotationViewport({
       return
     }
 
-    const nextDraft = beginDraft(activeTool, screenPoint, event.nativeEvent.timeStamp)
+    const nextDraft = beginDraft(activeTool, screenPoint, event.nativeEvent.timeStamp, event.altKey)
     if (nextDraft) {
       setBrushPointerPos(null)
       setDraft(nextDraft)
@@ -1587,6 +1629,8 @@ export function AnnotationViewport({
 
     if (activeTool === 'brush' && !draft) {
       setBrushPointerPos(screenPoint)
+      const armed = event.altKey && annotatorMode === 'mask' && !!videoAdapter
+      if (armed !== brushNegativeArmed) setBrushNegativeArmed(armed)
     }
 
     if (!draft) {
