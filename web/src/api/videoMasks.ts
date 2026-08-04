@@ -8,8 +8,11 @@ interface PromptClick {
 
 export interface PromptFrame {
   frame_index: number
-  type: 'click'
-  clicks: PromptClick[]
+  type: 'click' | 'mask'
+  /** Present for type 'click' — positive/negative point prompts. */
+  clicks?: PromptClick[]
+  /** Present for type 'mask' — base64 PNG (white=object) at source_size resolution. */
+  mask_b64?: string
 }
 
 export interface PropagateRequest {

@@ -38,8 +38,8 @@ import {
   type AnnotationDoc,
 } from './annotatorApi'
 import { getVersionHistory } from '../../api/versions'
-import { propagateMaskTrack, getMaskTrackStatus, listMaskTracks } from '../../api/videoMasks'
-import { isMaskShape, rasterizeMask, rasterizeScribble, rasterizeSketchInpaintGuide } from './rasterizeMask'
+import { propagateMaskTrack, getMaskTrackStatus, listMaskTracks, type PromptFrame } from '../../api/videoMasks'
+import { isMaskShape, rasterizeMask, rasterizeMaskPromptB64, rasterizeScribble, rasterizeSketchInpaintGuide } from './rasterizeMask'
 import { computeMaskBounds } from './maskBounds'
 import { MaskLayersPanel } from './components/MaskLayersPanel'
 import { MaskLayerDetailPanel } from './components/MaskLayerDetailPanel'
@@ -246,6 +246,9 @@ function AnnotatorWorkspace({
   const [videoMaskTracks, setVideoMaskTracks] = useState<Record<string, { version: number }>>({})
   // Guards the one-time mask-track seeding per asset (see rehydration effect below).
   const maskSeededRef = useRef<string | null>(null)
+  // SAM 2 prompt kind: 'points' = clicks (less work, SAM infers extent);
+  // 'mask' = rasterized paint (respects boundary). Default points (old feel).
+  const [maskPromptMode, setMaskPromptMode] = useState<'points' | 'mask'>('points')
   // Sidebar tab below the layers list: parameter controls vs render history.
   const [sidebarTab, setSidebarTab] = useState<'params' | 'history'>('params')
   const [previewMode, setPreviewMode] = useState(false)
@@ -792,46 +795,70 @@ function AnnotatorWorkspace({
     }
   }
 
-  /** Extract per-frame click prompts from mask brush strokes stored in the Yjs doc.
-   *  Reads live annotation state so it works even after page reload. */
-  function buildPromptFrames(layerId: string, annotations: AnnotationEntity[]) {
-    const byFrame = new Map<number, Array<{ x: number; y: number; positive: boolean }>>()
+  /** Sample up to 3 positive/negative click points along a stroke, in native
+   *  (world) pixels. Brush/freehand points are ON the object; polygon uses its
+   *  centroid (its vertices sit on the boundary). */
+  function sampleStrokeClicks(ann: AnnotationEntity, positive: boolean) {
+    const geom = ann.geometry
+    if (geom.kind !== 'brush' && geom.kind !== 'freehand' && geom.kind !== 'polygon') return []
+    if (geom.points.length === 0) return []
+    const worldPts = geom.points.map((p) => framePointToWorld(ann.frame, p))
+    if (geom.kind === 'polygon') {
+      const cx = worldPts.reduce((s, p) => s + p.x, 0) / worldPts.length
+      const cy = worldPts.reduce((s, p) => s + p.y, 0) / worldPts.length
+      return [{ x: cx, y: cy, positive }]
+    }
+    const out: Array<{ x: number; y: number; positive: boolean }> = []
+    const sampleCount = Math.min(3, worldPts.length)
+    for (let i = 0; i < sampleCount; i++) {
+      const p = worldPts[Math.floor((i * (worldPts.length - 1)) / Math.max(sampleCount - 1, 1))]
+      out.push({ x: p.x, y: p.y, positive })
+    }
+    return out
+  }
+
+  /** Build per-frame SAM 2 prompts from the mask strokes in the Yjs doc. Reads
+   *  live annotation state so it works after reload. A frame with any positive
+   *  paint becomes a MASK prompt (rasterized paint minus negatives — far more
+   *  boundary information than clicks); a negative-only frame falls back to
+   *  negative CLICK prompts (a correction that refines without a new mask). */
+  async function buildPromptFrames(
+    layerId: string,
+    annotations: AnnotationEntity[],
+  ): Promise<PromptFrame[]> {
+    const byFrame = new Map<number, { pos: AnnotationEntity[]; neg: AnnotationEntity[] }>()
     for (const ann of annotations) {
       if (!ann.maskRegion || ann.layerId !== layerId) continue
       const frameIndex = ann.frame.mediaBinding?.frame
       if (typeof frameIndex !== 'number') continue
       const geom = ann.geometry
       if (geom.kind !== 'brush' && geom.kind !== 'freehand' && geom.kind !== 'polygon') continue
-      const pts = geom.points
-      if (pts.length === 0) continue
-      // Geometry points are FRAME-LOCAL offsets from the stroke's anchor, not
-      // absolute image coords — convert via framePointToWorld (same as
-      // computeMaskBounds) or every click collapses to the image's top-left.
-      const worldPts = pts.map((p) => framePointToWorld(ann.frame, p))
-      // Negative (⌥/Alt) brush strokes are "not this object" hints (SAM label 0).
-      const positive = !(geom.kind === 'brush' && geom.negative)
-      const existing = byFrame.get(frameIndex) ?? []
-      if (geom.kind === 'polygon') {
-        // Polygon vertices sit on the boundary; the centroid is the best
-        // interior guess (imperfect for concave shapes).
-        const cx = worldPts.reduce((s, p) => s + p.x, 0) / worldPts.length
-        const cy = worldPts.reduce((s, p) => s + p.y, 0) / worldPts.length
-        existing.push({ x: cx, y: cy, positive })
-      } else {
-        // Brush/freehand points are ON the painted object; sample up to 3
-        // evenly along the stroke. (The centroid of a curved stroke can fall
-        // OFF the object — e.g. a C-shaped stroke around a torso.)
-        const sampleCount = Math.min(3, worldPts.length)
-        for (let i = 0; i < sampleCount; i++) {
-          const p = worldPts[Math.floor((i * (worldPts.length - 1)) / Math.max(sampleCount - 1, 1))]
-          existing.push({ x: p.x, y: p.y, positive })
+      if (geom.points.length === 0) continue
+      const bucket = byFrame.get(frameIndex) ?? { pos: [], neg: [] }
+      if (geom.kind === 'brush' && geom.negative) bucket.neg.push(ann)
+      else bucket.pos.push(ann)
+      byFrame.set(frameIndex, bucket)
+    }
+
+    const dims = imageDims
+    const frames: PromptFrame[] = []
+    for (const [frame_index, { pos, neg }] of Array.from(byFrame.entries()).sort(([a], [b]) => a - b)) {
+      // Mask mode (and only then): rasterize the painted object minus negatives.
+      if (maskPromptMode === 'mask' && pos.length && dims) {
+        const mask_b64 = await rasterizeMaskPromptB64(pos, neg, dims.width, dims.height)
+        if (mask_b64) {
+          frames.push({ frame_index, type: 'mask', mask_b64 })
+          continue
         }
       }
-      byFrame.set(frameIndex, existing)
+      // Points mode, negative-only frame, or no dims → click prompt.
+      const clicks = [
+        ...pos.flatMap((a) => sampleStrokeClicks(a, true)),
+        ...neg.flatMap((a) => sampleStrokeClicks(a, false)),
+      ]
+      if (clicks.length) frames.push({ frame_index, type: 'click', clicks })
     }
-    return Array.from(byFrame.entries())
-      .sort(([a], [b]) => a - b)
-      .map(([frame_index, clicks]) => ({ frame_index, type: 'click' as const, clicks }))
+    return frames
   }
 
   async function handlePropagateMaskTrack(layerId: string) {
@@ -843,7 +870,7 @@ function AnnotatorWorkspace({
     setMaskGenerateState((s) => ({ ...s, [layerId]: 'working' }))
 
     try {
-      const promptFrames = buildPromptFrames(layerId, snapshot.annotations)
+      const promptFrames = await buildPromptFrames(layerId, snapshot.annotations)
 
       if (promptFrames.length === 0) {
         setMaskGenerateState((s) => ({ ...s, [layerId]: 'Draw a mask first' }))
@@ -1564,6 +1591,8 @@ function AnnotatorWorkspace({
               onMoveLayerDown={handleMoveMaskLayerDown}
               onGenerateMask={handleGenerateMaskForLayer}
               onPropagateMask={handlePropagateMaskTrack}
+              promptMode={maskPromptMode}
+              onPromptModeChange={setMaskPromptMode}
             />
             {activeMaskLayerId ? (
               <div className="annotator-page__sidebar-tabs" role="tablist">

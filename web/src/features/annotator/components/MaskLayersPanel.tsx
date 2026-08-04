@@ -17,6 +17,10 @@ interface MaskLayersPanelProps {
   onMoveLayerDown: (id: string) => void
   onGenerateMask: (id: string) => void
   onPropagateMask?: (id: string) => void
+  /** SAM 2 prompt kind for video propagation: 'points' (clicks) or 'mask'
+   *  (rasterized paint). Only shown for video. */
+  promptMode?: 'points' | 'mask'
+  onPromptModeChange?: (mode: 'points' | 'mask') => void
 }
 
 export function MaskLayersPanel({
@@ -34,6 +38,8 @@ export function MaskLayersPanel({
   onMoveLayerDown,
   onGenerateMask,
   onPropagateMask,
+  promptMode = 'points',
+  onPromptModeChange,
 }: MaskLayersPanelProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingName, setEditingName] = useState('')
@@ -66,6 +72,30 @@ export function MaskLayersPanel({
           <Plus size={14} strokeWidth={2.5} />
         </button>
       </header>
+
+      {isVideo && onPromptModeChange ? (
+        <div className="mask-layers-panel__prompt-mode" role="group" aria-label="Propagation prompt type">
+          <span className="mask-layers-panel__prompt-mode-label">Prompt</span>
+          <div className="mask-layers-panel__prompt-mode-toggle">
+            <button
+              type="button"
+              className={promptMode === 'points' ? 'is-active' : ''}
+              onClick={() => onPromptModeChange('points')}
+              title="Send your strokes as SAM 2 click points — less work, SAM infers the full object extent from each point."
+            >
+              Points
+            </button>
+            <button
+              type="button"
+              className={promptMode === 'mask' ? 'is-active' : ''}
+              onClick={() => onPromptModeChange('mask')}
+              title="Send your painted region as a SAM 2 mask prompt — respects your boundary, best for precise masks."
+            >
+              Mask
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {layers.length === 0 ? (
         <div className="mask-layers-panel__empty">

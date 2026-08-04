@@ -211,3 +211,49 @@ export async function rasterizeSketchInpaintGuide(
 export function isMaskShape(annotation: AnnotationEntity) {
   return annotation.maskRegion === true && annotation.frame.space === 'image2d'
 }
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve((reader.result as string).split(',')[1])
+    reader.onerror = reject
+    reader.readAsDataURL(blob)
+  })
+}
+
+/**
+ * Rasterize a SAM 2 mask prompt: positive strokes filled white, then negative
+ * strokes erased (destination-out), yielding the object region the artist drew
+ * minus any ⌥/Alt "not this" strokes. Returns raw base64 PNG (white=object on
+ * transparent) at native pixel size, or null if there is no positive region.
+ */
+export async function rasterizeMaskPromptB64(
+  positives: AnnotationEntity[],
+  negatives: AnnotationEntity[],
+  width: number,
+  height: number,
+): Promise<string | null> {
+  if (!positives.length || width <= 0 || height <= 0) {
+    return null
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(width)
+  canvas.height = Math.round(height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    return null
+  }
+  ctx.fillStyle = '#ffffff'
+  ctx.strokeStyle = '#ffffff'
+  _drawAnnotationsToCanvas(ctx, positives)
+  if (negatives.length) {
+    // Carve the negative strokes back out of the painted region.
+    ctx.globalCompositeOperation = 'destination-out'
+    ctx.fillStyle = '#000000'
+    ctx.strokeStyle = '#000000'
+    _drawAnnotationsToCanvas(ctx, negatives)
+    ctx.globalCompositeOperation = 'source-over'
+  }
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+  return blob ? blobToBase64(blob) : null
+}
