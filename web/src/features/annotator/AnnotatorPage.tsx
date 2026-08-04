@@ -38,8 +38,8 @@ import {
   type AnnotationDoc,
 } from './annotatorApi'
 import { getVersionHistory } from '../../api/versions'
-import { propagateMaskTrack, getMaskTrackStatus, listMaskTracks, type PromptFrame } from '../../api/videoMasks'
-import { isMaskShape, rasterizeMask, rasterizeMaskPromptB64, rasterizeScribble, rasterizeSketchInpaintGuide } from './rasterizeMask'
+import { propagateMaskTrack, getMaskTrackStatus, listMaskTracks, maskFrameUrl, type PromptFrame } from '../../api/videoMasks'
+import { isMaskShape, rasterizeMask, rasterizeMaskPromptB64, rasterizeCorrectionMaskB64, rasterizeScribble, rasterizeSketchInpaintGuide } from './rasterizeMask'
 import { computeMaskBounds } from './maskBounds'
 import { MaskLayersPanel } from './components/MaskLayersPanel'
 import { MaskLayerDetailPanel } from './components/MaskLayerDetailPanel'
@@ -249,6 +249,9 @@ function AnnotatorWorkspace({
   // SAM 2 prompt kind: 'points' = clicks (less work, SAM infers extent);
   // 'mask' = rasterized paint (respects boundary). Default points (old feel).
   const [maskPromptMode, setMaskPromptMode] = useState<'points' | 'mask'>('points')
+  // Frames drawn on since the last (re-)propagation, per layer — the correction
+  // loop re-propagates from the earliest of these forward. Ref, not state: no render.
+  const correctionFramesRef = useRef<Record<string, Set<number>>>({})
   // Sidebar tab below the layers list: parameter controls vs render history.
   const [sidebarTab, setSidebarTab] = useState<'params' | 'history'>('params')
   const [previewMode, setPreviewMode] = useState(false)
@@ -825,6 +828,7 @@ function AnnotatorWorkspace({
   async function buildPromptFrames(
     layerId: string,
     annotations: AnnotationEntity[],
+    correction?: { editedFrames: Set<number>; priorVersion: number },
   ): Promise<PromptFrame[]> {
     const byFrame = new Map<number, { pos: AnnotationEntity[]; neg: AnnotationEntity[] }>()
     for (const ann of annotations) {
@@ -843,6 +847,18 @@ function AnnotatorWorkspace({
     const dims = imageDims
     const frames: PromptFrame[] = []
     for (const [frame_index, { pos, neg }] of Array.from(byFrame.entries()).sort(([a], [b]) => a - b)) {
+      // Correction: a frame edited this pass composites the prior mask + edits,
+      // so small deltas (even erase-only) re-establish the object at that frame.
+      if (correction?.editedFrames.has(frame_index) && dims) {
+        const prior = await loadImageElement(
+          maskFrameUrl(asset.id, layerId, frame_index, correction.priorVersion),
+        )
+        const mask_b64 = await rasterizeCorrectionMaskB64(prior, pos, neg, dims.width, dims.height)
+        if (mask_b64) {
+          frames.push({ frame_index, type: 'mask', mask_b64 })
+          continue
+        }
+      }
       // Mask mode (and only then): rasterize the painted object minus negatives.
       if (maskPromptMode === 'mask' && pos.length && dims) {
         const mask_b64 = await rasterizeMaskPromptB64(pos, neg, dims.width, dims.height)
@@ -861,7 +877,38 @@ function AnnotatorWorkspace({
     return frames
   }
 
-  async function handlePropagateMaskTrack(layerId: string) {
+  /** Initial full-span propagation (Propagate button). */
+  function handlePropagateMaskTrack(layerId: string) {
+    return runPropagation(layerId, {})
+  }
+
+  /** Correction loop: re-propagate only from the earliest frame edited since the
+   *  last run, forward to the end of the existing propagated span, and merge the
+   *  result over the prior version (frames before the edit are preserved). */
+  function handleCorrectMaskTrack(layerId: string) {
+    const edited = correctionFramesRef.current[layerId]
+    if (!edited || edited.size === 0) {
+      setMaskGenerateState((s) => ({ ...s, [layerId]: 'Draw a correction first' }))
+      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
+      return
+    }
+    const existing = maskTrackSegments[layerId]?.[0]
+    if (!existing) {
+      // No prior span to correct — fall back to a normal propagation.
+      return runPropagation(layerId, {})
+    }
+    const start = Math.min(...edited)
+    return runPropagation(layerId, {
+      correction: true,
+      span: { start, end: existing.endFrame },
+      editedFrames: new Set(edited),
+    })
+  }
+
+  async function runPropagation(
+    layerId: string,
+    opts: { correction?: boolean; span?: { start: number; end: number }; editedFrames?: Set<number> },
+  ) {
     // Cancel any previous in-flight propagation.
     propagationAbortRef.current?.abort()
     const abort = new AbortController()
@@ -870,22 +917,31 @@ function AnnotatorWorkspace({
     setMaskGenerateState((s) => ({ ...s, [layerId]: 'working' }))
 
     try {
-      const promptFrames = await buildPromptFrames(layerId, snapshot.annotations)
+      const promptFrames = await buildPromptFrames(
+        layerId,
+        snapshot.annotations,
+        opts.correction && opts.editedFrames
+          ? { editedFrames: opts.editedFrames, priorVersion: videoMaskTracks[layerId]?.version ?? 0 }
+          : undefined,
+      )
 
       if (promptFrames.length === 0) {
-        setMaskGenerateState((s) => ({ ...s, [layerId]: 'Draw a mask first' }))
+        const msg = opts.correction ? 'Draw a correction first' : 'Draw a mask first'
+        setMaskGenerateState((s) => ({ ...s, [layerId]: msg }))
         window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
         return
       }
 
-      // Dispatch to Django → Modal SAM 2. Send the user-selected span if any;
-      // otherwise the backend auto-scopes a window around the earliest prompt.
+      // Dispatch to Django → Modal SAM 2. A correction sends its computed span;
+      // otherwise use the user-selected span, else the backend auto-scopes.
       const propagatedLayer = maskLayers.find((l) => l.id === layerId)
       const dispatched = await propagateMaskTrack(asset.id, layerId, {
         prompt_frames: promptFrames,
-        propagation_params: maskSpan
-          ? { span_start: maskSpan.start, span_end: maskSpan.end }
-          : { full_clip: true },
+        propagation_params: opts.span
+          ? { span_start: opts.span.start, span_end: opts.span.end }
+          : maskSpan
+            ? { span_start: maskSpan.start, span_end: maskSpan.end }
+            : { full_clip: true },
         layer_name: propagatedLayer?.name,
         layer_color: propagatedLayer?.color,
         source_size: imageDims ?? undefined,
@@ -893,7 +949,7 @@ function AnnotatorWorkspace({
       if (abort.signal.aborted) return
 
       const dispatchAt = dispatched.dispatch_at_ms ?? Date.now()
-      const spanStart = dispatched.span_start ?? maskSpan?.start ?? 0
+      const spanStart = dispatched.span_start ?? opts.span?.start ?? maskSpan?.start ?? 0
 
       // Poll until done. Prefer the backend's phase string (e.g. "Segmenting… 12s"),
       // falling back to a locally-computed elapsed counter.
@@ -902,7 +958,7 @@ function AnnotatorWorkspace({
           const poll = async () => {
             if (abort.signal.aborted) { reject(new Error('Cancelled')); return }
             try {
-              const status = await getMaskTrackStatus(asset.id, layerId, dispatched.call_id, dispatchAt, spanStart)
+              const status = await getMaskTrackStatus(asset.id, layerId, dispatched.call_id, dispatchAt, spanStart, opts.correction)
               if (status.status === 'done') {
                 resolve({ ...dispatched, ...status })
               } else if (status.status === 'failed') {
@@ -910,7 +966,7 @@ function AnnotatorWorkspace({
               } else {
                 const elapsed = Math.round((Date.now() - dispatchAt) / 1000)
                 const label = status.progress ?? `${elapsed}s…`
-                setMaskGenerateState((s) => ({ ...s, [layerId]: label }))
+                setMaskGenerateState((s) => ({ ...s, [layerId]: (opts.correction ? 'Correcting… ' : '') + label }))
                 window.setTimeout(poll, 2000)
               }
             } catch (err) {
@@ -923,26 +979,29 @@ function AnnotatorWorkspace({
 
       if (abort.signal.aborted) return
 
-      // Update timeline: propagated segment spans the processed window, plus
-      // keyframes from the prompt frames.
+      // Update timeline. A correction keeps the overall propagated span (union
+      // with what existed); a fresh run sets it to the processed window.
       const totalFrames = asset.nb_frames ?? (asset.fps && asset.duration ? Math.round(asset.fps * asset.duration) : 240)
-      const segStart = dispatched.span_start ?? maskSpan?.start ?? 0
-      const segEnd = dispatched.span_end ?? maskSpan?.end ?? totalFrames - 1
+      const segStart = dispatched.span_start ?? opts.span?.start ?? maskSpan?.start ?? 0
+      const segEnd = dispatched.span_end ?? opts.span?.end ?? maskSpan?.end ?? totalFrames - 1
       const promptedFrameIndices = promptFrames.map((pf) => pf.frame_index)
       setMaskTrackKeyframes((prev) => {
         const merged = new Set([...(prev[layerId] ?? []), ...promptedFrameIndices])
         return { ...prev, [layerId]: Array.from(merged).sort((a, b) => a - b) }
       })
-      setMaskTrackSegments((prev) => ({
-        ...prev,
-        [layerId]: [{ startFrame: segStart, endFrame: segEnd, type: 'propagated' as const }],
-      }))
-      // Enable per-frame mask overlay for this layer; bump version to invalidate
-      // any cached mask images from a prior propagation.
+      setMaskTrackSegments((prev) => {
+        const existing = opts.correction ? prev[layerId]?.[0] : undefined
+        const startFrame = existing ? Math.min(existing.startFrame, segStart) : segStart
+        const endFrame = existing ? Math.max(existing.endFrame, segEnd) : segEnd
+        return { ...prev, [layerId]: [{ startFrame, endFrame, type: 'propagated' as const }] }
+      })
+      // Bump the mask-image cache version so corrected frames reload.
       setVideoMaskTracks((prev) => ({
         ...prev,
         [layerId]: { version: (prev[layerId]?.version ?? 0) + 1 },
       }))
+      // Edits are now baked into the track — reset the correction accumulator.
+      correctionFramesRef.current[layerId] = new Set()
 
       const latencyStr = result.latency_s != null ? ` · ${result.latency_s.toFixed(0)}s` : ''
       const frameStr = result.frames_processed != null ? `${result.frames_processed} frames` : 'Done'
@@ -988,6 +1047,8 @@ function AnnotatorWorkspace({
         if (existing.includes(frameIndex)) return prev
         return { ...prev, [layerId]: [...existing, frameIndex].sort((a, b) => a - b) }
       })
+      // Note the edit for the correction loop (re-propagate from the earliest edit).
+      ;(correctionFramesRef.current[layerId] ??= new Set()).add(frameIndex)
     }
     if (!liveGenEnabled || layerId !== activeMaskLayerId) {
       return
@@ -1591,6 +1652,8 @@ function AnnotatorWorkspace({
               onMoveLayerDown={handleMoveMaskLayerDown}
               onGenerateMask={handleGenerateMaskForLayer}
               onPropagateMask={handlePropagateMaskTrack}
+              onCorrectMask={handleCorrectMaskTrack}
+              trackedLayerIds={Object.fromEntries(Object.keys(videoMaskTracks).map((id) => [id, true]))}
               promptMode={maskPromptMode}
               onPromptModeChange={setMaskPromptMode}
             />

@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Eye, EyeOff, ChevronUp, ChevronDown, Image, ImageOff, Plus, Trash2, Wand2 } from 'lucide-react'
+import { Eye, EyeOff, ChevronUp, ChevronDown, Image, ImageOff, Plus, Trash2, Wand2, Stethoscope } from 'lucide-react'
 import type { AnnotationLayer } from '../core/annotations/types'
 
 interface MaskLayersPanelProps {
@@ -17,6 +17,10 @@ interface MaskLayersPanelProps {
   onMoveLayerDown: (id: string) => void
   onGenerateMask: (id: string) => void
   onPropagateMask?: (id: string) => void
+  /** Span-limited re-propagation from the earliest edited frame. */
+  onCorrectMask?: (id: string) => void
+  /** Layer ids that already have a propagated track (enables Correct). */
+  trackedLayerIds?: Record<string, boolean>
   /** SAM 2 prompt kind for video propagation: 'points' (clicks) or 'mask'
    *  (rasterized paint). Only shown for video. */
   promptMode?: 'points' | 'mask'
@@ -38,6 +42,8 @@ export function MaskLayersPanel({
   onMoveLayerDown,
   onGenerateMask,
   onPropagateMask,
+  onCorrectMask,
+  trackedLayerIds,
   promptMode = 'points',
   onPromptModeChange,
 }: MaskLayersPanelProps) {
@@ -153,15 +159,28 @@ export function MaskLayersPanel({
                 {/* actions */}
                 <div className="mask-layers-panel__actions" onClick={(e) => e.stopPropagation()}>
                   {isVideo ? (
-                    <button
-                      type="button"
-                      className="mask-layers-panel__action"
-                      title={generateState === 'working' ? 'Propagating…' : generateState !== 'idle' ? generateState : 'Propagate mask track'}
-                      disabled={generateState === 'working'}
-                      onClick={() => onPropagateMask?.(layer.id)}
-                    >
-                      <Wand2 size={13} strokeWidth={2} />
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="mask-layers-panel__action"
+                        title={generateState === 'working' ? 'Propagating…' : generateState !== 'idle' ? generateState : 'Propagate mask track'}
+                        disabled={generateState === 'working'}
+                        onClick={() => onPropagateMask?.(layer.id)}
+                      >
+                        <Wand2 size={13} strokeWidth={2} />
+                      </button>
+                      {trackedLayerIds?.[layer.id] && onCorrectMask ? (
+                        <button
+                          type="button"
+                          className="mask-layers-panel__action"
+                          title="Correct: re-propagate from your edit forward, merging into the track"
+                          disabled={generateState === 'working'}
+                          onClick={() => onCorrectMask(layer.id)}
+                        >
+                          <Stethoscope size={13} strokeWidth={2} />
+                        </button>
+                      ) : null}
+                    </>
                   ) : (
                     <button
                       type="button"

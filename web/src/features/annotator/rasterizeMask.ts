@@ -222,6 +222,48 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 /**
+ * Rasterize a CORRECTION mask prompt: the prior frame mask as the base, with the
+ * artist's positive strokes unioned on and negative strokes erased off. This lets
+ * a small delta edit (even erase-only) re-establish the object for a span-limited
+ * re-propagation, since the sub-span re-runs statelessly and needs the object
+ * defined at the correction frame. `priorMask` is the RGBA mask image (alpha =
+ * object) fetched from the mask endpoint, or null if the frame had no prior mask.
+ * Returns raw base64 PNG (white=object on transparent), or null if empty.
+ */
+export async function rasterizeCorrectionMaskB64(
+  priorMask: HTMLImageElement | null,
+  positives: AnnotationEntity[],
+  negatives: AnnotationEntity[],
+  width: number,
+  height: number,
+): Promise<string | null> {
+  if (width <= 0 || height <= 0) return null
+  if (!priorMask && positives.length === 0) return null // only negatives, no base
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(width)
+  canvas.height = Math.round(height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  // Base: prior mask (RGBA white-on-transparent, so alpha carries the region).
+  if (priorMask) ctx.drawImage(priorMask, 0, 0, canvas.width, canvas.height)
+  // Union the positive edits.
+  ctx.globalCompositeOperation = 'source-over'
+  ctx.fillStyle = '#ffffff'
+  ctx.strokeStyle = '#ffffff'
+  _drawAnnotationsToCanvas(ctx, positives)
+  // Carve the negative edits back out.
+  if (negatives.length) {
+    ctx.globalCompositeOperation = 'destination-out'
+    ctx.fillStyle = '#000000'
+    ctx.strokeStyle = '#000000'
+    _drawAnnotationsToCanvas(ctx, negatives)
+    ctx.globalCompositeOperation = 'source-over'
+  }
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+  return blob ? blobToBase64(blob) : null
+}
+
+/**
  * Rasterize a SAM 2 mask prompt: positive strokes filled white, then negative
  * strokes erased (destination-out), yielding the object region the artist drew
  * minus any ⌥/Alt "not this" strokes. Returns raw base64 PNG (white=object on

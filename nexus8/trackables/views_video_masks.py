@@ -371,6 +371,24 @@ class VideoMaskStatusView(APIView):
                     if 'frame_index' in f:
                         f['frame_index'] = f['frame_index'] + span_start
 
+            # Correction (span-limited re-propagation): overlay the re-run frames
+            # onto the prior version's frames, so the untouched part of the track
+            # is preserved with its provenance rather than recomputed.
+            is_correction = request.query_params.get('correction') in ('1', 'true')
+            prior_version_id = None
+            corrected_frames = None
+            if is_correction:
+                prior = track.versions.order_by('-version_number').first()
+                if prior:
+                    prior_version_id = str(prior.id)
+                    corrected_frames = sorted(f['frame_index'] for f in frames if 'frame_index' in f)
+                    merged = {f['frame_index']: f for f in prior.data.get('frames', [])
+                              if 'frame_index' in f}
+                    merged.update({f['frame_index']: f for f in frames if 'frame_index' in f})
+                    frames = [merged[i] for i in sorted(merged)]
+                    logger.info(f"{tag} correction merged: {len(corrected_frames)} re-run "
+                                f"frame(s) over {len(frames)} total")
+
             # Create new version with propagation results
             version = track.add_propagation_result(
                 propagation_model='SAM2',
@@ -381,6 +399,8 @@ class VideoMaskStatusView(APIView):
                 modal_call_id=call_id,
                 dispatch_at_ms=int(request.query_params.get('dispatch_at_ms', 0)),
                 result_at_ms=int(datetime.now().timestamp() * 1000),
+                prior_version_id=prior_version_id,
+                corrected_frames=corrected_frames,
             )
 
             return Response(

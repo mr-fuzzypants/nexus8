@@ -88,10 +88,11 @@ export async function getMaskTrackStatus(
   callId: string,
   dispatchAtMs?: number,
   spanStart?: number,
+  correction?: boolean,
 ): Promise<MaskTrackStatusResponse> {
   const { data } = await http.get<MaskTrackStatusResponse>(
     `/trackables/api/library/assets/${assetId}/video-mask/${layerId}/status/`,
-    { params: { call_id: callId, dispatch_at_ms: dispatchAtMs, span_start: spanStart } },
+    { params: { call_id: callId, dispatch_at_ms: dispatchAtMs, span_start: spanStart, correction: correction ? 1 : undefined } },
   )
   return data
 }
