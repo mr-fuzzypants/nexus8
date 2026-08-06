@@ -1855,6 +1855,7 @@ function AnnotatorWorkspace({
           onSetSpanIn={(frame) => setMaskSpan((s) => ({ start: frame, end: Math.max(frame, s?.end ?? frame) }))}
           onSetSpanOut={(frame) => setMaskSpan((s) => ({ start: Math.min(frame, s?.start ?? frame), end: frame }))}
           onClearSpan={() => setMaskSpan(null)}
+          onSpanChange={setMaskSpan}
         />
         {annotatorMode === 'mask' && !is3DModel ? (
           <>

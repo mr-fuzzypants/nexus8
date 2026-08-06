@@ -24,6 +24,8 @@ export interface VideoSourceOption {
 export interface VideoPlaylistClipState {
   id: string
   label: string
+  src: string
+  type?: string
   duration: number
   startTime: number
   endTime: number
@@ -72,10 +74,7 @@ export interface VideoViewerAdapter extends ViewerAdapter {
   loadFiles: (files: FileList | File[]) => void
 }
 
-interface PlaylistClipInternal extends VideoPlaylistClipState {
-  src: string
-  type?: string
-}
+type PlaylistClipInternal = VideoPlaylistClipState
 
 const DEFAULT_WIDTH = 1920
 const DEFAULT_HEIGHT = 1080
@@ -104,7 +103,7 @@ function clamp(value: number, min: number, max: number) {
 // The frame index a time falls in. floor (not round) so a time anywhere within
 // frame N — including its mid-point (N+0.5)/fps — reports N. The tiny epsilon
 // absorbs floating-point error at exact frame boundaries.
-function timeToFrame(time: number, frameRate: number) {
+export function timeToFrame(time: number, frameRate: number) {
   const fps = Math.max(frameRate, 1)
   return Math.max(0, Math.floor(time * fps + 1e-6))
 }
@@ -112,7 +111,7 @@ function timeToFrame(time: number, frameRate: number) {
 // The timestamp at the centre of a frame. Seeking here lands inside the intended
 // frame for constant-frame-rate sources, which `fastSeek` (keyframe snapping)
 // cannot guarantee. This is the core of frame-accurate seeking.
-function frameToMidTime(frame: number, frameRate: number) {
+export function frameToMidTime(frame: number, frameRate: number) {
   const fps = Math.max(frameRate, 1)
   return (Math.max(0, frame) + 0.5) / fps
 }
@@ -187,6 +186,8 @@ function clonePlaylistState(clips: PlaylistClipInternal[]): VideoPlaylistClipSta
   return clips.map((clip) => ({
     id: clip.id,
     label: clip.label,
+    src: clip.src,
+    type: clip.type,
     duration: clip.duration,
     startTime: clip.startTime,
     endTime: clip.endTime,

@@ -142,6 +142,8 @@ interface ViewportProps {
   onSetSpanIn?: (frame: number) => void
   onSetSpanOut?: (frame: number) => void
   onClearSpan?: () => void
+  /** Direct span replacement from the filmstrip trim handles. */
+  onSpanChange?: (span: { start: number; end: number } | null) => void
 }
 
 function hasBoundsGeometry(geometry: AnnotationGeometry): geometry is Extract<AnnotationGeometry, { start: Vec2; end: Vec2 }> {
@@ -235,6 +237,7 @@ export function AnnotationViewport({
   onSetSpanIn,
   onSetSpanOut,
   onClearSpan,
+  onSpanChange,
 }: ViewportProps) {
   const surfaceRef = useRef<HTMLDivElement>(null)
   const surfaceHostRef = useRef<HTMLDivElement>(null)
@@ -2113,7 +2116,7 @@ export function AnnotationViewport({
       </div>
       {videoAdapter ? (
         <>
-          <VideoTransport adapter={videoAdapter} />
+          <VideoTransport adapter={videoAdapter} span={maskSpan} onSpanChange={onSpanChange} />
           {annotatorMode === 'mask' && maskLayers && maskLayers.length > 0 ? (
             <MaskTrackTimeline
               tracks={maskLayers.map((layer) => ({
