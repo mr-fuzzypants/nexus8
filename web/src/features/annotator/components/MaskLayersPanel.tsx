@@ -25,6 +25,17 @@ interface MaskLayersPanelProps {
    *  (rasterized paint). Only shown for video. */
   promptMode?: 'points' | 'mask'
   onPromptModeChange?: (mode: 'points' | 'mask') => void
+  /** Staging resolution tier for propagation (detail vs cost). */
+  stagingTier?: string
+  onStagingTierChange?: (tier: 'preview_480p' | 'preview_720p' | 'native') => void
+  /** SAM mask overlay opacity (0–1; 0 = hidden). */
+  maskOverlayOpacity?: number
+  onMaskOverlayOpacityChange?: (v: number) => void
+  /** Prompt display: 'result' (clean mask) | 'edit' (markers) | 'soloNeg'. */
+  promptDisplay?: 'result' | 'edit' | 'soloNeg'
+  onPromptDisplayChange?: (mode: 'result' | 'edit' | 'soloNeg') => void
+  /** Delete the active layer's negative strokes on the current frame. */
+  onClearNegatives?: (layerId: string) => void
 }
 
 export function MaskLayersPanel({
@@ -46,6 +57,13 @@ export function MaskLayersPanel({
   trackedLayerIds,
   promptMode = 'points',
   onPromptModeChange,
+  stagingTier = 'preview_480p',
+  onStagingTierChange,
+  maskOverlayOpacity = 0.45,
+  onMaskOverlayOpacityChange,
+  promptDisplay = 'result',
+  onPromptDisplayChange,
+  onClearNegatives,
 }: MaskLayersPanelProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingName, setEditingName] = useState('')
@@ -100,6 +118,79 @@ export function MaskLayersPanel({
               Mask
             </button>
           </div>
+        </div>
+      ) : null}
+
+      {isVideo && onStagingTierChange ? (
+        <div className="mask-layers-panel__prompt-mode">
+          <span className="mask-layers-panel__prompt-mode-label">Res</span>
+          <select
+            className="mask-layers-panel__res-select"
+            value={stagingTier}
+            onChange={(e) => onStagingTierChange(e.target.value as 'preview_480p' | 'preview_720p' | 'native')}
+            title="Staging resolution: higher preserves fine mask detail (thin trims, fingers) but uploads more and runs slower."
+          >
+            <option value="preview_480p">480p · fast</option>
+            <option value="preview_720p">720p</option>
+            <option value="native">Native · best</option>
+          </select>
+        </div>
+      ) : null}
+
+      {isVideo && onMaskOverlayOpacityChange ? (
+        <div className="mask-layers-panel__prompt-mode">
+          <span className="mask-layers-panel__prompt-mode-label">Mask</span>
+          <input
+            className="mask-layers-panel__opacity"
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(maskOverlayOpacity * 100)}
+            onChange={(e) => onMaskOverlayOpacityChange(Number(e.target.value) / 100)}
+            title="SAM mask overlay opacity (0 = hidden)"
+          />
+        </div>
+      ) : null}
+
+      {isVideo && onPromptDisplayChange ? (
+        <div className="mask-layers-panel__prompt-mode" role="group" aria-label="Prompt display">
+          <span className="mask-layers-panel__prompt-mode-label">Prompts</span>
+          <div className="mask-layers-panel__prompt-mode-toggle">
+            <button
+              type="button"
+              className={promptDisplay === 'result' ? 'is-active' : ''}
+              onClick={() => onPromptDisplayChange('result')}
+              title="Result: clean mask; erases shown as the mask receding, no stroke markers."
+            >
+              Result
+            </button>
+            <button
+              type="button"
+              className={promptDisplay === 'edit' ? 'is-active' : ''}
+              onClick={() => onPromptDisplayChange('edit')}
+              title="Edit: show positive + negative strokes as selectable markers (Select tool to delete)."
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              className={promptDisplay === 'soloNeg' ? 'is-active' : ''}
+              onClick={() => onPromptDisplayChange('soloNeg')}
+              title="Neg: show only negative (erase) strokes — isolate them to select and delete."
+            >
+              Neg
+            </button>
+          </div>
+          {activeLayerId && onClearNegatives ? (
+            <button
+              type="button"
+              className="mask-layers-panel__clear-neg"
+              onClick={() => onClearNegatives(activeLayerId)}
+              title="Delete this layer's negative strokes on the current frame"
+            >
+              Clear −
+            </button>
+          ) : null}
         </div>
       ) : null}
 

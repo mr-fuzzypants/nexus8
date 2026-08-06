@@ -163,6 +163,8 @@ function normalizeGeometry(geometry: AnnotationGeometry): AnnotationGeometry {
         kind: 'brush',
         points: geometry.points.map((point) => normalizeVec2(point, { x: 0, y: 0 })),
         radius: Math.max(0.5, finiteNumber(geometry.radius, 12)),
+        // Preserve the negative (erase / "not this") polarity through the store.
+        ...(geometry.negative ? { negative: true } : {}),
       }
     case 'polygon':
       return {

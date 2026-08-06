@@ -156,14 +156,19 @@ class VideoMaskPropagateView(APIView):
                     {'error': f'Video file not found for asset {asset_id}'},
                     status=status.HTTP_404_NOT_FOUND,
                 )
+            # Resolution tier: caller may override (fine detail vs. cost). Fall
+            # back to the default if the requested tier is unknown.
+            tier = request.data.get('staging_tier') or STAGING_TIER
+            if tier not in VideoFrameStager.TIERS:
+                tier = STAGING_TIER
             logger.info(f"{tag} staging span [{span_start}, {span_end}] "
-                        f"({STAGING_TIER}) from {video_path} …")
+                        f"({tier}) from {video_path} …")
             t_stage = time.time()
             staging_dir = VideoFrameStager.extract_frames(
                 video_path,
                 asset_id=str(video.id),
                 version_id=str(video.id),
-                tier=STAGING_TIER,
+                tier=tier,
                 frame_range=(span_start, span_end),
             )
             frame_count = len(list(staging_dir.glob('frame_*.jpg')))
@@ -222,10 +227,15 @@ class VideoMaskPropagateView(APIView):
                             f"in {time.time() - t_arc:.1f}s; dispatching to Modal …")
 
                 # Spawn the propagation job (frame indices are span-relative).
+                # session_key/meta: the GPU container retains the inference
+                # state after propagation so correction clicks on propagated
+                # frames refine the existing mask (see session_click).
                 modal_call = segmentor.propagate.spawn(
                     frames_tar_gz=frames_archive,
                     prompt_frames=span_prompt_frames,
                     propagation_params=propagation_params,
+                    session_key=f"{asset_id}:{layer_id}",
+                    session_meta={"tier": tier, "span_start": span_start},
                 )
                 call_id = modal_call.object_id  # Modal FunctionCall id (see views_inpaint)
                 logger.info(f"{tag} DISPATCHED call_id={call_id} "
@@ -450,6 +460,133 @@ class VideoMaskCancelView(APIView):
         return Response({'status': 'cancelled'})
 
 
+class VideoMaskPreviewView(APIView):
+    """Interactive prompt-frame preview: clicks on one frame → that frame's mask.
+
+    Powers the demo-style tight loop: the artist refines clicks with sub-second
+    feedback BEFORE committing to a full propagation. The approved preview mask
+    is then sent as the propagation's mask prompt ("compile" step, client-side).
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, asset_id: str, layer_id: str):
+        """POST /api/library/assets/<id>/video-mask/<layer_id>/preview/
+
+        Body: {"frame_index": N, "clicks": [{x, y, positive}] (native px),
+               "source_size": {width, height}, "staging_tier": "preview_480p"}
+        """
+        import time as _time
+        t0 = _time.time()
+
+        try:
+            frame_index = int(request.data.get('frame_index'))
+        except (TypeError, ValueError):
+            return Response({'error': 'frame_index required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        clicks = request.data.get('clicks') or []
+        if not clicks:
+            return Response({'error': 'clicks required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        video = get_object_or_404(MediaAsset, id=asset_id)
+        video_path = _resolve_local_path(video.file_path)
+        if not video_path or not os.path.exists(video_path):
+            return Response({'error': 'Video file not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        tier = request.data.get('staging_tier') or STAGING_TIER
+        if tier not in VideoFrameStager.TIERS:
+            tier = STAGING_TIER
+
+        # Stage just this frame (cached per (asset, tier, frame)).
+        try:
+            staging_dir = VideoFrameStager.extract_frames(
+                video_path,
+                asset_id=str(video.id),
+                version_id=str(video.id),
+                tier=tier,
+                frame_range=(frame_index, frame_index),
+            )
+            frame_path = sorted(staging_dir.glob('frame_*.jpg'))[0]
+        except (FrameStagingError, IndexError) as e:
+            return Response({'error': f'Frame staging failed: {e}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Rescale clicks native → staged px (same contract as propagate, F9).
+        from PIL import Image as PILImage
+        with PILImage.open(frame_path) as im:
+            staged_w, staged_h = im.size
+        source_size = request.data.get('source_size') or {}
+        src_w, src_h = source_size.get('width'), source_size.get('height')
+        if src_w and src_h:
+            sx, sy = staged_w / src_w, staged_h / src_h
+            clicks = [{**c, 'x': c['x'] * sx, 'y': c['y'] * sy} for c in clicks]
+
+        conditioned = False
+        try:
+            import modal
+            segmentor = modal.Cls.from_name(MODAL_APP_NAME, "VideoSegmentor")()
+
+            # Demo-style correction path: when the client reports a live
+            # propagation session, click against the retained video state so
+            # the frame's PROPAGATED mask conditions the result (the click
+            # refines the existing mask instead of re-solving from scratch).
+            result = None
+            session_span_start = request.data.get('session_span_start')
+            if session_span_start is not None:
+                sess = segmentor.session_click.remote(
+                    session_key=f"{asset_id}:{layer_id}",
+                    session_meta={'tier': tier,
+                                  'span_start': int(session_span_start)},
+                    frame_index=frame_index - int(session_span_start),
+                    clicks=clicks,
+                )
+                if not sess.get('no_session'):
+                    result = sess
+                    conditioned = True
+                else:
+                    logger.info(f"[preview {asset_id}/{layer_id[:8]}] session "
+                                f"gone — stateless fallback")
+
+            if result is None:
+                # The stateless preview needs a positive click to establish
+                # the object; a negative-only correction only means something
+                # against an existing mask, which we no longer have.
+                if not any(c.get('positive', True) for c in clicks):
+                    return Response({'mask_b64': None, 'conditioned': False})
+                result = segmentor.preview.remote(
+                    frame_jpeg=frame_path.read_bytes(),
+                    clicks=clicks,
+                )
+        except Exception as exc:
+            logger.exception(f"[preview {asset_id}/{layer_id[:8]}] Modal preview failed")
+            return Response({'error': f'Preview failed: {exc}'},
+                            status=status.HTTP_502_BAD_GATEWAY)
+
+        # Convert the binary mask to RGBA (alpha = object) — the same tintable
+        # format as VideoMaskFrameView, and directly usable as a mask prompt.
+        import base64 as _b64
+        mask = PILImage.open(io.BytesIO(_b64.b64decode(result['mask_png_b64']))).convert('L')
+        rgba = PILImage.new('RGBA', mask.size, (255, 255, 255, 0))
+        rgba.putalpha(mask)
+        buf = io.BytesIO()
+        rgba.save(buf, format='PNG')
+
+        logger.info(f"[preview {asset_id}/{layer_id[:8]}] frame {frame_index}, "
+                    f"{len(clicks)} click(s), "
+                    f"{'conditioned' if conditioned else 'stateless'}, "
+                    f"score={result.get('score', 0):.3f}, "
+                    f"total {_time.time() - t0:.2f}s "
+                    f"(gpu {result.get('latency_s', 0):.2f}s)")
+        return Response({
+            'mask_b64': _b64.b64encode(buf.getvalue()).decode(),
+            'score': result.get('score'),
+            'latency_s': result.get('latency_s'),
+            'conditioned': conditioned,
+        })
+
+
 class VideoMaskTrackInfoView(APIView):
     """Return persisted track state so the timeline can rehydrate after reload.
 
@@ -486,6 +623,38 @@ class VideoMaskTrackInfoView(APIView):
             'keyframes': track.get_keyframes(version_id=str(version.id)),
             'low_confidence_frames': low_conf,
         })
+
+    def delete(self, request, asset_id: str, layer_id: str):
+        """DELETE /api/library/assets/<id>/video-mask/<layer_id>/[?purge=1]
+
+        Removes the video↔track relation so the layer stops rehydrating on
+        reload. With purge=1, also deletes the MaskTrack entity and all its
+        versions — i.e. the stored per-frame mask PNGs. Without purge the
+        track data is retained (orphaned) and recoverable by re-linking.
+        """
+        from .models.relations import EntityRelation
+
+        purge = request.query_params.get('purge') in ('1', 'true')
+        relations = EntityRelation.objects.filter(
+            asset_id=str(asset_id), role='mask_track',
+            type_data__layer_id=layer_id,
+        )
+        track_ids = list(relations.values_list('entity_id', flat=True))
+        relations.delete()
+
+        purged = 0
+        if purge:
+            for track in MaskTrack.objects.filter(pk__in=track_ids):
+                # Symlinks RESTRICT their version FK — remove them before the
+                # versions, then the entity itself.
+                track.symlinks.all().delete()
+                track.versions.all().delete()
+                track.delete()
+                purged += 1
+
+        logger.info(f"[delete {asset_id[:8]}/{layer_id[:8]}] "
+                    f"unlinked {len(track_ids)} track(s), purged {purged}")
+        return Response({'deleted': bool(track_ids), 'purged': purged})
 
 
 class VideoMaskListView(APIView):

@@ -100,6 +100,7 @@ from .views_video_masks import (
     VideoMaskFrameView,
     VideoMaskTrackInfoView,
     VideoMaskListView,
+    VideoMaskPreviewView,
 )
 from .views_intelligence import (
     AssetRelationsView,
@@ -145,6 +146,7 @@ urlpatterns = [
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/status/', VideoMaskStatusView.as_view(), name='library-video-mask-status'),
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/cancel/', VideoMaskCancelView.as_view(), name='library-video-mask-cancel'),
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/mask/', VideoMaskFrameView.as_view(), name='library-video-mask-frame'),
+    path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/preview/', VideoMaskPreviewView.as_view(), name='library-video-mask-preview'),
     path('api/library/assets/<str:asset_id>/video-masks/', VideoMaskListView.as_view(), name='library-video-mask-list'),
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/', VideoMaskTrackInfoView.as_view(), name='library-video-mask-info'),
     path('api/library/annotations/', AnnotationDocListCreateView.as_view(), name='library-annotations'),

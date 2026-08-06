@@ -86,7 +86,11 @@ def _tar_to_jpeg_dir(tar_bytes: bytes) -> tuple[str, int]:
     return frames_dir, len(png_paths)
 
 
-@app.cls(image=image, gpu="A10G", timeout=600, scaledown_window=300)
+# max_containers=1: propagation sessions are retained in-container so that
+# correction clicks hit the container holding the inference state. Serializes
+# GPU work across users — acceptable for the single-user experiment.
+@app.cls(image=image, gpu="A10G", timeout=600, scaledown_window=300,
+         max_containers=1)
 class VideoSegmentor:
     """SAM 2.1 video segmentor with forward mask propagation."""
 
@@ -109,12 +113,190 @@ class VideoSegmentor:
         )
         print("SAM 2.1 video predictor loaded")
 
+        # Interactive single-frame predictor for the click→preview loop. Built
+        # from the SAME Apache-2.0 checkpoint (loaded separately for safety —
+        # the image predictor wraps a plain SAM2Base). Original implementation;
+        # no code from the sam2 demo app is used.
+        from sam2.build_sam import build_sam2
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+        image_model = build_sam2(SAM2_CFG, ckpt_path, device=self.device)
+        self.image_predictor = SAM2ImagePredictor(image_model)
+        # Cache the last image embedding by frame-bytes hash so repeated clicks
+        # on the same frame skip the encoder (the expensive part).
+        self._preview_embed_key = None
+        # Last prediction's clicks + low-res logits for the cached frame, so a
+        # refinement click is conditioned on the previous mask (mask_input)
+        # instead of re-solving from bare coordinates.
+        self._preview_chain = None
+
+        # Retained video-predictor sessions (demo-style corrections): after a
+        # propagation we keep the inference state so a click on a propagated
+        # frame refines the existing mask — add_new_points_or_box feeds the
+        # frame's propagated logits back as prev_sam_mask_logits. Keyed by
+        # "<asset>:<layer>". A 600-frame hiera-large state holds ~1 GB of
+        # per-frame memory features, hence the small LRU cap.
+        self._sessions: dict[str, dict] = {}
+        self._max_sessions = 2
+        print("SAM 2.1 image predictor loaded")
+
+    @modal.method()
+    def preview(self, frame_jpeg: bytes, clicks: list[dict]) -> dict:
+        """Interactive prompt-frame preview: one frame + clicks → mask, fast.
+
+        Args:
+            frame_jpeg: The staged frame as JPEG bytes.
+            clicks: [{"x": px, "y": px, "positive": bool}] in frame-pixel coords.
+
+        Returns:
+            {"mask_png_b64": <binary mask PNG, white=object>,
+             "score": float, "latency_s": float}
+        """
+        import hashlib
+
+        import numpy as np
+        from PIL import Image as PILImage
+
+        t0 = time.time()
+
+        key = hashlib.sha256(frame_jpeg).hexdigest()
+        if self._preview_embed_key != key:
+            img = np.array(PILImage.open(io.BytesIO(frame_jpeg)).convert("RGB"))
+            self.image_predictor.set_image(img)
+            self._preview_embed_key = key
+            self._preview_chain = None
+
+        points = np.array([[c["x"], c["y"]] for c in clicks], dtype=np.float32)
+        labels = np.array(
+            [1 if c.get("positive", True) else 0 for c in clicks], dtype=np.int32
+        )
+
+        # Official SAM interactive protocol: chain the previous prediction's
+        # low-res logits as mask_input so each new click refines the current
+        # mask rather than re-solving from bare coordinates. Only chain when
+        # the click list extends the one we predicted from — on undo/edit the
+        # cached mask includes a click that no longer exists, so start over.
+        mask_input = None
+        chain = self._preview_chain
+        if (
+            chain is not None
+            and len(clicks) > len(chain["clicks"])
+            and clicks[: len(chain["clicks"])] == chain["clicks"]
+        ):
+            mask_input = chain["logits"]
+
+        # Single ambiguous click → let SAM propose scales and take the best;
+        # with more clicks (or a mask prior) the single-mask head is better.
+        multimask = mask_input is None and len(clicks) == 1
+        masks, scores, low_res_logits = self.image_predictor.predict(
+            point_coords=points,
+            point_labels=labels,
+            mask_input=mask_input,
+            multimask_output=multimask,
+        )
+        best = int(np.argmax(scores))
+        self._preview_chain = {
+            "clicks": clicks,
+            "logits": low_res_logits[best][None],  # (1, 256, 256)
+        }
+        mask_np = (masks[best] > 0).astype("uint8") * 255
+
+        buf = io.BytesIO()
+        PILImage.fromarray(mask_np).save(buf, format="PNG")
+        latency = time.time() - t0
+        print(f"preview: {len(clicks)} click(s), "
+              f"{'chained' if mask_input is not None else 'fresh'}, "
+              f"score={float(scores[best]):.3f}, {latency*1000:.0f}ms")
+        return {
+            "mask_png_b64": base64.b64encode(buf.getvalue()).decode(),
+            "score": float(scores[best]),
+            "latency_s": latency,
+        }
+
+    @modal.method()
+    def session_click(
+        self,
+        session_key: str,
+        session_meta: dict,
+        frame_index: int,
+        clicks: list[dict],
+    ) -> dict:
+        """Correction click against a retained propagation session.
+
+        add_new_points_or_box looks up the frame's existing output (propagated
+        or previously clicked) and feeds it back as prev_sam_mask_logits, so
+        the click REFINES the current mask instead of re-solving from bare
+        coordinates — the SAM2 demo's correction mechanism. Negative-only
+        clicks are valid here: the prior mask establishes the object.
+
+        Args:
+            session_key: "<asset>:<layer>" — must match a retained session.
+            session_meta: Must equal the meta stored at propagate time.
+            frame_index: Span-relative frame index.
+            clicks: ALL current clicks for this frame (points are replaced,
+                not accumulated), in staged-frame pixel coords.
+
+        Returns:
+            {"mask_png_b64", "score", "latency_s", "conditioned": True} on
+            success, or {"no_session": True} when the state is gone/mismatched
+            (caller should fall back to the stateless preview).
+        """
+        import numpy as np
+        import torch
+        from PIL import Image as PILImage
+
+        t0 = time.time()
+
+        sess = self._sessions.get(session_key)
+        if sess is None:
+            print(f"session_click: no session {session_key}")
+            return {"no_session": True}
+        if session_meta != sess["meta"]:
+            print(f"session_click: meta mismatch {session_meta} != {sess['meta']}")
+            return {"no_session": True}
+        if not 0 <= frame_index < sess["total_frames"]:
+            print(f"session_click: frame {frame_index} outside "
+                  f"[0, {sess['total_frames'] - 1}]")
+            return {"no_session": True}
+        # LRU touch.
+        self._sessions[session_key] = self._sessions.pop(session_key)
+
+        points = np.array([[c["x"], c["y"]] for c in clicks], dtype=np.float32)
+        labels = np.array(
+            [1 if c.get("positive", True) else 0 for c in clicks], dtype=np.int32
+        )
+        _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
+            inference_state=sess["state"],
+            frame_idx=frame_index,
+            obj_id=1,
+            points=points,
+            labels=labels,
+        )
+        obj_pos = list(out_obj_ids).index(1)
+        logit = out_mask_logits[obj_pos]                    # [1, H, W]
+        mask_np = (logit > 0.0).squeeze().cpu().numpy().astype("uint8") * 255
+        score = float(torch.sigmoid(logit.max()).cpu())
+
+        buf = io.BytesIO()
+        PILImage.fromarray(mask_np).save(buf, format="PNG")
+        latency = time.time() - t0
+        print(f"session_click: {session_key} frame {frame_index}, "
+              f"{len(clicks)} click(s), score={score:.3f}, {latency*1000:.0f}ms")
+        return {
+            "mask_png_b64": base64.b64encode(buf.getvalue()).decode(),
+            "score": score,
+            "latency_s": latency,
+            "conditioned": True,
+        }
+
     @modal.method()
     def propagate(
         self,
         frames_tar_gz: bytes,
         prompt_frames: list[dict],
         propagation_params: dict,
+        session_key: str | None = None,
+        session_meta: dict | None = None,
     ) -> dict:
         """Propagate masks from prompt frames across video frames.
 
@@ -125,6 +307,11 @@ class VideoSegmentor:
                   "clicks": [{"x": 320.0, "y": 240.0, "positive": true}]}, ...]
             propagation_params:
                 {"full_clip": true}  — span_start / span_end for sub-clip not yet used.
+            session_key: If set, retain the inference state after propagation so
+                session_click can refine propagated frames (demo-style corrections).
+            session_meta: Opaque dict echoed back to session_click for validation
+                (tier + span, so stale clients can't click against a mismatched
+                session).
 
         Returns:
             {"frames": [{frame_index, mask_png_b64, confidence, authorship}, ...],
@@ -136,6 +323,15 @@ class VideoSegmentor:
         from PIL import Image as PILImage
 
         t0 = time.time()
+
+        # Free the session being replaced (and LRU overflow) BEFORE building the
+        # new state so peak GPU/CPU memory stays bounded.
+        if session_key:
+            self._sessions.pop(session_key, None)
+            while len(self._sessions) >= self._max_sessions:
+                evicted = next(iter(self._sessions))
+                del self._sessions[evicted]
+                print(f"session evicted: {evicted}")
 
         # ── Unpack frames ──────────────────────────────────────────────────────
         frames_dir, total_frames = _tar_to_jpeg_dir(frames_tar_gz)
@@ -240,6 +436,17 @@ class VideoSegmentor:
             frames_out = [result_by_frame[i] for i in range(total_frames) if i in result_by_frame]
             latency_s = time.time() - t0
             print(f"Done: {len(frames_out)} frames in {latency_s:.1f}s")
+
+            # Retain the state for demo-style correction clicks. The decoded
+            # frames live in inference_state["images"], so frames_dir can still
+            # be removed in the finally block.
+            if session_key:
+                self._sessions[session_key] = {
+                    "state": inference_state,
+                    "meta": session_meta or {},
+                    "total_frames": total_frames,
+                }
+                print(f"session retained: {session_key} ({total_frames} frames)")
 
             return {
                 "frames": frames_out,

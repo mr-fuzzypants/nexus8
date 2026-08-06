@@ -30,9 +30,11 @@ class FrameStagingError(Exception):
 class VideoFrameStager:
     """Manages on-demand frame extraction and staging for video processing."""
 
-    # Resolution tiers: (name, scale_filter)
+    # Resolution tiers: (name, scale_filter). Higher tiers preserve fine mask
+    # detail (thin trims, fingers) at higher upload/GPU cost.
     TIERS = {
         'native': None,  # No scaling
+        'preview_720p': 'scale=w=1280:h=720:force_original_aspect_ratio=decrease',
         'preview_480p': 'scale=w=854:h=480:force_original_aspect_ratio=decrease',
     }
 

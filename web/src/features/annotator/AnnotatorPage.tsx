@@ -38,7 +38,7 @@ import {
   type AnnotationDoc,
 } from './annotatorApi'
 import { getVersionHistory } from '../../api/versions'
-import { propagateMaskTrack, getMaskTrackStatus, listMaskTracks, maskFrameUrl, type PromptFrame } from '../../api/videoMasks'
+import { propagateMaskTrack, getMaskTrackStatus, listMaskTracks, deleteMaskTrack, maskFrameUrl, previewMask, type PromptFrame } from '../../api/videoMasks'
 import { isMaskShape, rasterizeMask, rasterizeMaskPromptB64, rasterizeCorrectionMaskB64, rasterizeScribble, rasterizeSketchInpaintGuide } from './rasterizeMask'
 import { computeMaskBounds } from './maskBounds'
 import { MaskLayersPanel } from './components/MaskLayersPanel'
@@ -249,9 +249,30 @@ function AnnotatorWorkspace({
   // SAM 2 prompt kind: 'points' = clicks (less work, SAM infers extent);
   // 'mask' = rasterized paint (respects boundary). Default points (old feel).
   const [maskPromptMode, setMaskPromptMode] = useState<'points' | 'mask'>('points')
+  // Staging resolution: higher preserves fine detail (thin trims) at more cost.
+  const [maskStagingTier, setMaskStagingTier] = useState<'preview_480p' | 'preview_720p' | 'native'>('preview_480p')
+  // Display controls for the correction workflow (active layer, video only):
+  //  - maskOverlayOpacity: SAM mask tint alpha (0 = hidden).
+  //  - promptDisplay: 'result' (clean mask, erase shown as receding) |
+  //    'edit' (positive+negative strokes as selectable markers) | 'soloNeg'.
+  const [maskOverlayOpacity, setMaskOverlayOpacity] = useState(0.45)
+  const [promptDisplay, setPromptDisplay] = useState<'result' | 'edit' | 'soloNeg'>('result')
+  // Live current video frame, written by the viewport — for frame-scoped actions.
+  const videoFrameRef = useRef(0)
+  // Interactive SAM previews: per (layer, frame), the latest single-frame mask
+  // from the click→preview loop. Displayed in place of the track mask on that
+  // frame, and "compiled" into the propagation as the frame's mask prompt.
+  const [previewMasks, setPreviewMasks] = useState<Record<string, Record<number, { dataUrl: string; version: number }>>>({})
+  const previewDebounceRef = useRef<number | null>(null)
+  const previewReqIdRef = useRef(0)
   // Frames drawn on since the last (re-)propagation, per layer — the correction
   // loop re-propagates from the earliest of these forward. Ref, not state: no render.
   const correctionFramesRef = useRef<Record<string, Set<number>>>({})
+  // Span of each layer's last dispatched propagation. The GPU container keeps
+  // that run's inference state alive, so previews inside this span can be
+  // refined AGAINST the propagated mask (demo-style corrections) by sending
+  // session_span_start. Ref, not state: no render.
+  const maskSessionRef = useRef<Record<string, { spanStart: number; spanEnd: number }>>({})
   // Sidebar tab below the layers list: parameter controls vs render history.
   const [sidebarTab, setSidebarTab] = useState<'params' | 'history'>('params')
   const [previewMode, setPreviewMode] = useState(false)
@@ -645,6 +666,30 @@ function AnnotatorWorkspace({
   }
 
   function handleRemoveMaskLayer(id: string) {
+    // Deleting the layer from the Yjs doc is not enough on video: the mount
+    // effect restores any layer whose MaskTrack survives in the DB. Unlink the
+    // track server-side so the layer stays deleted, and offer to purge the
+    // stored mask data (all versions) with it.
+    if (isVideo) {
+      const hasTrack = Boolean(videoMaskTracks[id] || maskTrackSegments[id])
+      if (hasTrack) {
+        const layer = maskLayers.find((l) => l.id === id)
+        if (!window.confirm(`Delete layer "${layer?.name ?? 'Mask'}"? It will not come back after reload.`)) {
+          return
+        }
+        const purge = window.confirm(
+          'Also permanently delete its stored mask data (all versions) from the database?\n\n'
+          + 'OK — delete the data too\nCancel — keep the data (layer is still removed)',
+        )
+        void deleteMaskTrack(asset.id, id, purge).catch(() => {
+          console.warn('Failed to delete mask track for layer', id)
+        })
+      } else {
+        // A track may exist server-side that this session never saw (e.g. a
+        // propagation dispatched before a reload) — unlink it just in case.
+        void deleteMaskTrack(asset.id, id, false).catch(() => {})
+      }
+    }
     room.store.removeLayer(id)
     if (activeMaskLayerId === id) {
       const remaining = maskLayers.filter((l) => l.id !== id)
@@ -652,6 +697,7 @@ function AnnotatorWorkspace({
     }
     setMaskTrackKeyframes(({ [id]: _, ...rest }) => rest)
     setMaskTrackSegments(({ [id]: _, ...rest }) => rest)
+    setVideoMaskTracks(({ [id]: _, ...rest }) => rest)
   }
 
   function handleRenameMaskLayer(id: string, name: string) {
@@ -798,24 +844,142 @@ function AnnotatorWorkspace({
     }
   }
 
-  /** Sample up to 3 positive/negative click points along a stroke, in native
-   *  (world) pixels. Brush/freehand points are ON the object; polygon uses its
-   *  centroid (its vertices sit on the boundary). */
+  /** Sample positive/negative click points from a stroke, in native (world)
+   *  pixels. Gesture semantics decide the count (demo parity, F19): a DAB —
+   *  movement within the brush's own footprint — is ONE precise point, which
+   *  keeps SAM's single-point multimask (subpart/part/whole granularity)
+   *  available; only a real DRAG samples up to 3 points along the path, which
+   *  means "the object spanning all of these". Polygon uses its centroid (its
+   *  vertices sit on the boundary). */
   function sampleStrokeClicks(ann: AnnotationEntity, positive: boolean) {
     const geom = ann.geometry
     if (geom.kind !== 'brush' && geom.kind !== 'freehand' && geom.kind !== 'polygon') return []
     if (geom.points.length === 0) return []
     const worldPts = geom.points.map((p) => framePointToWorld(ann.frame, p))
-    if (geom.kind === 'polygon') {
-      const cx = worldPts.reduce((s, p) => s + p.x, 0) / worldPts.length
-      const cy = worldPts.reduce((s, p) => s + p.y, 0) / worldPts.length
-      return [{ x: cx, y: cy, positive }]
+    const centroid = () => ({
+      x: worldPts.reduce((s, p) => s + p.x, 0) / worldPts.length,
+      y: worldPts.reduce((s, p) => s + p.y, 0) / worldPts.length,
+      positive,
+    })
+    if (geom.kind === 'polygon') return [centroid()]
+    if (geom.kind === 'brush') {
+      const xs = worldPts.map((p) => p.x)
+      const ys = worldPts.map((p) => p.y)
+      const extent = Math.hypot(
+        Math.max(...xs) - Math.min(...xs),
+        Math.max(...ys) - Math.min(...ys),
+      )
+      if (extent <= geom.radius) return [centroid()]
     }
     const out: Array<{ x: number; y: number; positive: boolean }> = []
     const sampleCount = Math.min(3, worldPts.length)
     for (let i = 0; i < sampleCount; i++) {
       const p = worldPts[Math.floor((i * (worldPts.length - 1)) / Math.max(sampleCount - 1, 1))]
       out.push({ x: p.x, y: p.y, positive })
+    }
+    return out
+  }
+
+  /** Clicks (pos + neg) for one layer+frame from the live Yjs strokes. */
+  function collectFrameClicks(layerId: string, frame: number) {
+    const anns = room.store.getSnapshot().annotations
+    const clicks: Array<{ x: number; y: number; positive: boolean }> = []
+    for (const ann of anns) {
+      if (!ann.maskRegion || ann.layerId !== layerId) continue
+      if (ann.frame.mediaBinding?.frame !== frame) continue
+      const geom = ann.geometry
+      if (geom.kind !== 'brush' && geom.kind !== 'freehand' && geom.kind !== 'polygon') continue
+      if (geom.points.length === 0) continue
+      const negative = geom.kind === 'brush' && geom.negative === true
+      clicks.push(...sampleStrokeClicks(ann, !negative))
+    }
+    return clicks
+  }
+
+  /** Interactive click→preview loop (demo-style): debounce after each stroke,
+   *  ask SAM for THIS frame's mask from the accumulated clicks, and show it
+   *  immediately. The settled preview becomes the propagation's mask prompt. */
+  function schedulePreview(layerId: string) {
+    if (!isVideo) return
+    const frame = videoFrameRef.current
+    if (previewDebounceRef.current != null) window.clearTimeout(previewDebounceRef.current)
+    previewDebounceRef.current = window.setTimeout(async () => {
+      previewDebounceRef.current = null
+      const clicks = collectFrameClicks(layerId, frame)
+      if (clicks.length === 0) return
+      // Inside a live propagation session the propagated mask establishes the
+      // object, so negative-only corrections are valid; otherwise a positive
+      // click is required to give SAM something to segment.
+      const sess = maskSessionRef.current[layerId]
+      const inSession = !!sess && frame >= sess.spanStart && frame <= sess.spanEnd
+      if (!inSession && !clicks.some((c) => c.positive)) return
+      const reqId = ++previewReqIdRef.current
+      setMaskGenerateState((s) => ({ ...s, [layerId]: 'preview…' }))
+      try {
+        const result = await previewMask(asset.id, layerId, {
+          frame_index: frame,
+          clicks,
+          source_size: imageDims ?? undefined,
+          staging_tier: maskStagingTier,
+          session_span_start: inSession ? sess.spanStart : undefined,
+        })
+        if (reqId !== previewReqIdRef.current) return // superseded by a newer click
+        if (!result.mask_b64) {
+          // Negative-only clicks and the session was gone — nothing to show.
+          setMaskGenerateState((s) => (s[layerId] === 'preview…' ? { ...s, [layerId]: 'idle' } : s))
+          return
+        }
+        setPreviewMasks((prev) => ({
+          ...prev,
+          [layerId]: {
+            ...(prev[layerId] ?? {}),
+            [frame]: {
+              dataUrl: `data:image/png;base64,${result.mask_b64}`,
+              version: (prev[layerId]?.[frame]?.version ?? 0) + 1,
+            },
+          },
+        }))
+        const pct = result.score != null ? ` ${Math.round(result.score * 100)}%` : ''
+        setMaskGenerateState((s) => (s[layerId] === 'preview…' ? { ...s, [layerId]: `SAM${pct}` } : s))
+        window.setTimeout(() => {
+          setMaskGenerateState((s) => (s[layerId]?.startsWith('SAM') ? { ...s, [layerId]: 'idle' } : s))
+        }, 1500)
+      } catch {
+        if (reqId !== previewReqIdRef.current) return
+        setMaskGenerateState((s) => (s[layerId] === 'preview…' ? { ...s, [layerId]: 'idle' } : s))
+      }
+    }, 350)
+  }
+
+  /** Sample up to `count` positive seed points from inside a prior mask image
+   *  (RGBA, alpha = object), returned in native pixels. Used to keep the object
+   *  established when a correction is expressed as negative clicks. */
+  function sampleMaskInteriorPoints(
+    img: HTMLImageElement,
+    nativeW: number,
+    nativeH: number,
+    count: number,
+  ): Array<{ x: number; y: number }> {
+    const c = document.createElement('canvas')
+    c.width = img.naturalWidth
+    c.height = img.naturalHeight
+    const ctx = c.getContext('2d')
+    if (!ctx || c.width === 0 || c.height === 0) return []
+    ctx.drawImage(img, 0, 0)
+    const data = ctx.getImageData(0, 0, c.width, c.height).data
+    // Subsample a grid so large masks don't scan millions of pixels.
+    const step = Math.max(1, Math.floor(Math.sqrt((c.width * c.height) / 4000)))
+    const object: Array<{ x: number; y: number }> = []
+    for (let y = 0; y < c.height; y += step) {
+      for (let x = 0; x < c.width; x += step) {
+        if (data[(y * c.width + x) * 4 + 3] > 127) object.push({ x, y })
+      }
+    }
+    if (object.length === 0) return []
+    const out: Array<{ x: number; y: number }> = []
+    for (let i = 0; i < count; i++) {
+      const p = object[Math.floor(((i + 0.5) / count) * object.length)]
+      out.push({ x: (p.x * nativeW) / c.width, y: (p.y * nativeH) / c.height })
     }
     return out
   }
@@ -847,12 +1011,49 @@ function AnnotatorWorkspace({
     const dims = imageDims
     const frames: PromptFrame[] = []
     for (const [frame_index, { pos, neg }] of Array.from(byFrame.entries()).sort(([a], [b]) => a - b)) {
-      // Correction: a frame edited this pass composites the prior mask + edits,
-      // so small deltas (even erase-only) re-establish the object at that frame.
+      // Compile step: if the artist refined this frame through the interactive
+      // preview loop, the settled preview IS the approved mask — send it as the
+      // mask prompt. This is how clicks (interaction) become a mask (contract).
+      const approved = previewMasks[layerId]?.[frame_index]
+      if (approved) {
+        frames.push({ frame_index, type: 'mask', mask_b64: approved.dataUrl.split(',')[1] })
+        continue
+      }
+      // Correction: an edited frame is re-established from the prior mask + edits.
       if (correction?.editedFrames.has(frame_index) && dims) {
         const prior = await loadImageElement(
           maskFrameUrl(asset.id, layerId, frame_index, correction.priorVersion),
         )
+        // If the edit REMOVES (negative strokes), prefer click prompts: a
+        // negative point is a far stronger "not this" signal than a hole in a
+        // soft mask, which SAM tends to heal over (esp. thin trims near hands).
+        // Seed positives from the prior mask so the object stays established.
+        if (neg.length > 0) {
+          let seed = prior ? sampleMaskInteriorPoints(prior, dims.width, dims.height, 6) : []
+          // Drop seed points that fall inside an erase stroke — the prior mask
+          // includes the bleed being removed, so an unfiltered seed would place
+          // positives on the very region the negatives are trying to exclude.
+          const negRegions = neg.flatMap((a) =>
+            a.geometry.kind === 'brush'
+              ? [{ pts: a.geometry.points.map((p) => framePointToWorld(a.frame, p)), r: a.geometry.radius }]
+              : [],
+          )
+          if (negRegions.length) {
+            seed = seed.filter((s) =>
+              !negRegions.some((ns) => ns.pts.some((p) => Math.hypot(p.x - s.x, p.y - s.y) <= ns.r)),
+            )
+          }
+          const clicks = [
+            ...seed.map((p) => ({ x: p.x, y: p.y, positive: true })),
+            ...pos.flatMap((a) => sampleStrokeClicks(a, true)),
+            ...neg.flatMap((a) => sampleStrokeClicks(a, false)),
+          ]
+          if (clicks.some((c) => c.positive)) {
+            frames.push({ frame_index, type: 'click', clicks })
+            continue
+          }
+        }
+        // Additive-only correction → composite mask (respects the added boundary).
         const mask_b64 = await rasterizeCorrectionMaskB64(prior, pos, neg, dims.width, dims.height)
         if (mask_b64) {
           frames.push({ frame_index, type: 'mask', mask_b64 })
@@ -885,6 +1086,20 @@ function AnnotatorWorkspace({
   /** Correction loop: re-propagate only from the earliest frame edited since the
    *  last run, forward to the end of the existing propagated span, and merge the
    *  result over the prior version (frames before the edit are preserved). */
+  /** Delete this layer's negative (erase) strokes on the current frame. */
+  function handleClearNegatives(layerId: string) {
+    const frame = videoFrameRef.current
+    const snap = room.store.getSnapshot()
+    const toRemove = snap.annotations.filter(
+      (a) =>
+        a.maskRegion && a.layerId === layerId &&
+        a.geometry.kind === 'brush' && a.geometry.negative === true &&
+        a.frame.mediaBinding?.frame === frame,
+    )
+    for (const a of toRemove) room.store.removeAnnotation(a.id)
+    // Those frames are re-marked as edited only on new strokes; nothing else to do.
+  }
+
   function handleCorrectMaskTrack(layerId: string) {
     const edited = correctionFramesRef.current[layerId]
     if (!edited || edited.size === 0) {
@@ -945,6 +1160,7 @@ function AnnotatorWorkspace({
         layer_name: propagatedLayer?.name,
         layer_color: propagatedLayer?.color,
         source_size: imageDims ?? undefined,
+        staging_tier: maskStagingTier,
       })
       if (abort.signal.aborted) return
 
@@ -1000,8 +1216,13 @@ function AnnotatorWorkspace({
         ...prev,
         [layerId]: { version: (prev[layerId]?.version ?? 0) + 1 },
       }))
-      // Edits are now baked into the track — reset the correction accumulator.
+      // Edits are now baked into the track — reset the correction accumulator
+      // and drop the interactive previews (the track masks supersede them).
       correctionFramesRef.current[layerId] = new Set()
+      setPreviewMasks((prev) => ({ ...prev, [layerId]: {} }))
+      // The GPU container now holds this run's inference state; previews in
+      // the DISPATCHED span (not the merged segment) can correct against it.
+      maskSessionRef.current[layerId] = { spanStart: segStart, spanEnd: segEnd }
 
       const latencyStr = result.latency_s != null ? ` · ${result.latency_s.toFixed(0)}s` : ''
       const frameStr = result.frames_processed != null ? `${result.frames_processed} frames` : 'Done'
@@ -1049,6 +1270,8 @@ function AnnotatorWorkspace({
       })
       // Note the edit for the correction loop (re-propagate from the earliest edit).
       ;(correctionFramesRef.current[layerId] ??= new Set()).add(frameIndex)
+      // Kick the interactive click→preview loop for immediate SAM feedback.
+      if (layerId === activeMaskLayerId) schedulePreview(layerId)
     }
     if (!liveGenEnabled || layerId !== activeMaskLayerId) {
       return
@@ -1624,6 +1847,10 @@ function AnnotatorWorkspace({
           maskTrackSegments={maskTrackSegments}
           assetId={asset.id}
           videoMaskTracks={videoMaskTracks}
+          maskOverlayOpacity={maskOverlayOpacity}
+          promptDisplay={promptDisplay}
+          videoFrameRef={videoFrameRef}
+          previewMasks={previewMasks}
           maskSpan={maskSpan}
           onSetSpanIn={(frame) => setMaskSpan((s) => ({ start: frame, end: Math.max(frame, s?.end ?? frame) }))}
           onSetSpanOut={(frame) => setMaskSpan((s) => ({ start: Math.min(frame, s?.start ?? frame), end: frame }))}
@@ -1656,6 +1883,13 @@ function AnnotatorWorkspace({
               trackedLayerIds={Object.fromEntries(Object.keys(videoMaskTracks).map((id) => [id, true]))}
               promptMode={maskPromptMode}
               onPromptModeChange={setMaskPromptMode}
+              stagingTier={maskStagingTier}
+              onStagingTierChange={setMaskStagingTier}
+              maskOverlayOpacity={maskOverlayOpacity}
+              onMaskOverlayOpacityChange={setMaskOverlayOpacity}
+              promptDisplay={promptDisplay}
+              onPromptDisplayChange={setPromptDisplay}
+              onClearNegatives={handleClearNegatives}
             />
             {activeMaskLayerId ? (
               <div className="annotator-page__sidebar-tabs" role="tablist">

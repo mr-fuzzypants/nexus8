@@ -1,6 +1,6 @@
 import { http } from './library'
 
-interface PromptClick {
+export interface PromptClick {
   x: number
   y: number
   positive: boolean
@@ -27,6 +27,9 @@ export interface PropagateRequest {
   /** Native pixel dimensions the click coordinates are expressed in. The backend
    *  rescales clicks to the staged (downscaled) frame size SAM 2 actually sees. */
   source_size?: { width: number; height: number }
+  /** Staging resolution tier: 'preview_480p' | 'preview_720p' | 'native'. Higher
+   *  preserves fine mask detail at higher upload/GPU cost. */
+  staging_tier?: string
 }
 
 export interface MaskTrackSummary {
@@ -128,6 +131,53 @@ export function maskFrameUrl(
   version = 0,
 ): string {
   return `/trackables/api/library/assets/${assetId}/video-mask/${layerId}/mask/?frame=${frame}&v=${version}`
+}
+
+export interface PreviewMaskResponse {
+  /** RGBA PNG b64, alpha = object — tintable for display, usable as mask prompt.
+   *  Null when no mask could be produced (negative-only clicks with no live
+   *  propagation session to correct against). */
+  mask_b64: string | null
+  score?: number | null
+  latency_s?: number | null
+  /** True when the mask was refined against the retained propagation state
+   *  (demo-style correction) rather than solved statelessly from clicks. */
+  conditioned?: boolean
+}
+
+/** Interactive prompt-frame preview: clicks on one frame → that frame's mask. */
+export async function previewMask(
+  assetId: number,
+  layerId: string,
+  body: {
+    frame_index: number
+    clicks: PromptClick[]
+    source_size?: { width: number; height: number }
+    staging_tier?: string
+    /** span_start of the layer's last propagation — asks the backend to click
+     *  against the retained session so the propagated mask conditions the result. */
+    session_span_start?: number
+  },
+): Promise<PreviewMaskResponse> {
+  const { data } = await http.post<PreviewMaskResponse>(
+    `/trackables/api/library/assets/${assetId}/video-mask/${layerId}/preview/`,
+    body,
+  )
+  return data
+}
+
+/** Unlink a layer's mask track so it no longer restores on reload. With
+ *  `purge`, also permanently delete the stored mask data (all versions). */
+export async function deleteMaskTrack(
+  assetId: number,
+  layerId: string,
+  purge: boolean,
+): Promise<{ deleted: boolean; purged: number }> {
+  const { data } = await http.delete<{ deleted: boolean; purged: number }>(
+    `/trackables/api/library/assets/${assetId}/video-mask/${layerId}/`,
+    { params: purge ? { purge: 1 } : undefined },
+  )
+  return data
 }
 
 export async function cancelMaskTrack(

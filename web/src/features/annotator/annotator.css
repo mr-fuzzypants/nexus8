@@ -217,6 +217,37 @@
   color: #5eead4;
 }
 
+.mask-layers-panel__res-select {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 2px 6px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 6px;
+  background: var(--color-bg, #0f172a);
+  color: rgba(226, 232, 240, 0.9);
+  cursor: pointer;
+}
+
+.mask-layers-panel__opacity {
+  margin-left: auto;
+  width: 60%;
+  cursor: pointer;
+}
+
+.mask-layers-panel__clear-neg {
+  font-size: 12px;
+  padding: 2px 8px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #fca5a5;
+  cursor: pointer;
+}
+
+.mask-layers-panel__clear-neg:hover {
+  background: rgba(239, 68, 68, 0.24);
+}
+
 .mask-layers-panel__empty {
   padding: 20px 16px;
   font-size: 12px;

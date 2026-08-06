@@ -11,6 +11,7 @@ import {
 } from 'react'
 import { Eye, Layers, Sparkles } from 'lucide-react'
 import {
+  framePointToWorld,
   normalizeBounds,
   vec2Distance,
   worldToFrameLocal,
@@ -131,6 +132,12 @@ interface ViewportProps {
   maskTrackSegments?: Record<string, Array<{ startFrame: number; endFrame: number; type: 'propagated' | 'lowConfidence' }>>
   assetId?: number
   videoMaskTracks?: Record<string, { version: number }>
+  maskOverlayOpacity?: number
+  promptDisplay?: 'result' | 'edit' | 'soloNeg'
+  videoFrameRef?: { current: number }
+  /** Interactive single-frame SAM previews, per (layer, frame); shown in place
+   *  of the propagated track mask on that frame. */
+  previewMasks?: Record<string, Record<number, { dataUrl: string; version: number }>>
   maskSpan?: { start: number; end: number } | null
   onSetSpanIn?: (frame: number) => void
   onSetSpanOut?: (frame: number) => void
@@ -220,6 +227,10 @@ export function AnnotationViewport({
   maskTrackSegments,
   assetId,
   videoMaskTracks,
+  maskOverlayOpacity = 0.45,
+  promptDisplay = 'result',
+  videoFrameRef,
+  previewMasks,
   maskSpan,
   onSetSpanIn,
   onSetSpanOut,
@@ -921,12 +932,27 @@ export function AnnotationViewport({
       }
     }
 
+    // Prompt-display filter (video mask mode): 'result' hides all mask strokes
+    // (the erase shows as the mask receding instead); 'soloNeg' shows only
+    // negatives; 'edit' shows everything. Non-mask annotations are unaffected.
+    const promptDisplayShows = (annotation: AnnotationEntity) => {
+      if (!videoAdapter || annotatorMode !== 'mask' || !annotation.maskRegion) return true
+      const isNeg = annotation.geometry.kind === 'brush' && annotation.geometry.negative === true
+      if (promptDisplay === 'soloNeg') return isNeg
+      if (promptDisplay === 'edit') return true
+      // 'result': hide the stroke only where a propagated mask already represents
+      // it — before propagation there's no mask, so keep the strokes visible so
+      // the artist can see what they've drawn.
+      return !videoMaskTracks?.[annotation.layerId]
+    }
+
     const plan = buildAnnotationSceneRenderPlan({
       projectionHost,
       viewport,
       annotations: [
         ...visibleAnnotations
           .filter((annotation) => !((isInlineEditorOpen && annotation.id === inlineEditorId) || annotation.id === dragPreview?.id))
+          .filter(promptDisplayShows)
           .map((annotation) => ({
             annotation,
             selected: annotation.id === selectedId,
@@ -1028,6 +1054,7 @@ export function AnnotationViewport({
       videoMaskTracks && assetId != null
     ) {
       const currentFrame = videoAdapter.getMediaState().currentFrame
+      if (videoFrameRef) videoFrameRef.current = currentFrame
       const tl = adapter.worldToScreen({ x: 0, y: 0, z: 0 }, viewport)
       const br = adapter.worldToScreen({ x: imageDims.width, y: imageDims.height, z: 0 }, viewport)
       if (tl && br) {
@@ -1038,14 +1065,20 @@ export function AnnotationViewport({
           h: Math.abs(br.y - tl.y),
         }
         for (const layer of maskLayers) {
+          if (!layer.visible) continue
           const track = videoMaskTracks[layer.id]
-          if (!track || !layer.visible) continue
+          // An interactive preview for this exact frame supersedes the track
+          // mask — it's the live click→refine state the artist is building.
+          const pv = previewMasks?.[layer.id]?.[currentFrame]
+          if (!track && !pv) continue
 
-          const key = `${layer.id}:${track.version}:${currentFrame}`
+          const key = pv
+            ? `preview:${layer.id}:${pv.version}:${currentFrame}`
+            : `${layer.id}:${track!.version}:${currentFrame}`
           const cached = maskImgCacheRef.current.get(key)
 
           if (cached === undefined) {
-            // Lazily fetch this frame's mask; redraw once it resolves.
+            // Lazily fetch/decode this frame's mask; redraw once it resolves.
             maskImgCacheRef.current.set(key, 'loading')
             const im = new Image()
             im.onload = () => {
@@ -1056,7 +1089,7 @@ export function AnnotationViewport({
               // 204 No Content (no mask for this frame) lands here.
               maskImgCacheRef.current.set(key, 'empty')
             }
-            im.src = maskFrameUrl(assetId, layer.id, currentFrame, track.version)
+            im.src = pv ? pv.dataUrl : maskFrameUrl(assetId, layer.id, currentFrame, track!.version)
             continue
           }
           if (cached === 'loading' || cached === 'empty') continue
@@ -1074,10 +1107,62 @@ export function AnnotationViewport({
           tctx.fillStyle = layer.color || '#06b6d4'
           tctx.fillRect(0, 0, tint.width, tint.height)
 
+          if (maskOverlayOpacity <= 0) continue  // mask hidden
+
           context.save()
-          context.globalAlpha = 0.45
+          context.globalAlpha = maskOverlayOpacity
           context.drawImage(tint, rect.x, rect.y, rect.w, rect.h)
           context.restore()
+
+          // Erase preview: punch holes in the just-drawn mask where this layer's
+          // ⌥/Alt (negative) strokes are — so an erase reads as the mask receding
+          // to reveal the frame. Committed negatives only recede in 'result'
+          // mode (in 'edit'/'soloNeg' they show as red markers instead); the
+          // in-progress draft always recedes for live drawing feedback.
+          // Skip committed-negative punching when showing a PREVIEW: the preview
+          // is SAM's answer to those clicks — punching would hide where SAM
+          // disagreed with the erase, which is what the artist needs to see.
+          const eraseStrokes = promptDisplay === 'result' && !pv
+            ? visibleAnnotations.filter(
+                (a) => a.maskRegion && a.layerId === layer.id &&
+                  a.geometry.kind === 'brush' && a.geometry.negative,
+              )
+            : []
+          if (draft && draft.layerId === layer.id &&
+              draft.geometry.kind === 'brush' && draft.geometry.negative) {
+            eraseStrokes.push(draft)
+          }
+          if (eraseStrokes.length) {
+            const sx = rect.w / imageDims.width
+            const sy = rect.h / imageDims.height
+            const toScreen = (fx: number, fy: number, frame: AnnotationEntity['frame']) => {
+              const w = framePointToWorld(frame, { x: fx, y: fy })
+              return { x: rect.x + w.x * sx, y: rect.y + w.y * sy }
+            }
+            context.save()
+            context.globalCompositeOperation = 'destination-out'
+            context.lineJoin = 'round'
+            context.lineCap = 'round'
+            context.strokeStyle = '#000'
+            context.fillStyle = '#000'
+            for (const stroke of eraseStrokes) {
+              const geom = stroke.geometry
+              if (geom.kind !== 'brush') continue
+              const pts = geom.points.map((p) => toScreen(p.x, p.y, stroke.frame))
+              const lw = Math.max(1, geom.radius * 2) * sx
+              if (pts.length === 1) {
+                context.beginPath()
+                context.arc(pts[0].x, pts[0].y, lw / 2, 0, Math.PI * 2)
+                context.fill()
+              } else if (pts.length >= 2) {
+                context.beginPath()
+                pts.forEach((p, i) => (i === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y)))
+                context.lineWidth = lw
+                context.stroke()
+              }
+            }
+            context.restore()
+          }
         }
       }
     }
@@ -1108,7 +1193,7 @@ export function AnnotationViewport({
       }
       context.restore()
     }
-  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, assetId, brushNegativeArmed, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, layerRenders, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskLayers, maskPreviewMode, maskTick, participants, projectionHost, refImageTick, selectedId, videoAdapter, videoMaskTracks, viewport, visibleAnnotations])
+  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, assetId, brushNegativeArmed, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, layerRenders, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskLayers, maskOverlayOpacity, maskPreviewMode, maskTick, participants, previewMasks, projectionHost, promptDisplay, refImageTick, selectedId, videoAdapter, videoMaskTracks, viewport, visibleAnnotations])
 
   // Marching-ants border while a generation is in flight. Runs on its own
   // canvas so the 60fps dash animation never triggers React re-renders or full
@@ -1693,7 +1778,7 @@ export function AnnotationViewport({
           ...current,
           geometry:
             current.geometry.kind === 'brush'
-              ? { kind: 'brush', points: previewPoints, radius: current.geometry.radius }
+              ? { kind: 'brush', points: previewPoints, radius: current.geometry.radius, ...(current.geometry.negative ? { negative: true } : {}) }
               : { kind: 'freehand', points: previewPoints },
         }
       })
@@ -1777,7 +1862,7 @@ export function AnnotationViewport({
         ...draftRef.current,
         geometry:
           geometry.kind === 'brush'
-            ? { kind: 'brush', points: finalizedPoints, radius: geometry.radius }
+            ? { kind: 'brush', points: finalizedPoints, radius: geometry.radius, ...(geometry.negative ? { negative: true } : {}) }
             : { kind: 'freehand', points: finalizedPoints },
       })
       setDraft(null)
