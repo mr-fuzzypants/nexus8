@@ -139,11 +139,11 @@ interface ViewportProps {
    *  of the propagated track mask on that frame. */
   previewMasks?: Record<string, Record<number, { dataUrl: string; version: number }>>
   maskSpan?: { start: number; end: number } | null
-  onSetSpanIn?: (frame: number) => void
-  onSetSpanOut?: (frame: number) => void
-  onClearSpan?: () => void
   /** Direct span replacement from the filmstrip trim handles. */
   onSpanChange?: (span: { start: number; end: number } | null) => void
+  /** Per-layer propagation spans; a layer's own span overrides the global one. */
+  layerSpans?: Record<string, { start: number; end: number } | null>
+  onLayerSpanChange?: (layerId: string, span: { start: number; end: number } | null) => void
 }
 
 function hasBoundsGeometry(geometry: AnnotationGeometry): geometry is Extract<AnnotationGeometry, { start: Vec2; end: Vec2 }> {
@@ -234,11 +234,24 @@ export function AnnotationViewport({
   videoFrameRef,
   previewMasks,
   maskSpan,
-  onSetSpanIn,
-  onSetSpanOut,
-  onClearSpan,
   onSpanChange,
+  layerSpans,
+  onLayerSpanChange,
 }: ViewportProps) {
+  // Zoom-to-span state is lifted here (not in VideoTransport) so the filmstrip
+  // and the mask-track lanes render the same frame window when zoomed.
+  const [zoomToSpan, setZoomToSpan] = useState(false)
+  const maskSpanActive = maskSpan != null && maskSpan.end >= maskSpan.start
+  // Clearing the span drops the zoom (render-time state adjustment, not an effect).
+  const [prevMaskSpanActive, setPrevMaskSpanActive] = useState(maskSpanActive)
+  if (prevMaskSpanActive !== maskSpanActive) {
+    setPrevMaskSpanActive(maskSpanActive)
+    if (!maskSpanActive) {
+      setZoomToSpan(false)
+    }
+  }
+  const spanViewWindow = zoomToSpan && maskSpanActive ? maskSpan! : null
+
   const surfaceRef = useRef<HTMLDivElement>(null)
   const surfaceHostRef = useRef<HTMLDivElement>(null)
   const backgroundCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -2116,7 +2129,13 @@ export function AnnotationViewport({
       </div>
       {videoAdapter ? (
         <>
-          <VideoTransport adapter={videoAdapter} span={maskSpan} onSpanChange={onSpanChange} />
+          <VideoTransport
+            adapter={videoAdapter}
+            span={maskSpan}
+            onSpanChange={onSpanChange}
+            zoomToSpan={zoomToSpan}
+            onZoomToSpanChange={setZoomToSpan}
+          />
           {annotatorMode === 'mask' && maskLayers && maskLayers.length > 0 ? (
             <MaskTrackTimeline
               tracks={maskLayers.map((layer) => ({
@@ -2129,9 +2148,9 @@ export function AnnotationViewport({
               currentFrame={videoAdapter.getMediaState().currentFrame}
               totalFrames={videoAdapter.getMediaState().duration ? Math.round(videoAdapter.getMediaState().duration * videoAdapter.getMediaState().frameRate) : 240}
               span={maskSpan}
-              onSetSpanIn={() => onSetSpanIn?.(videoAdapter.getMediaState().currentFrame)}
-              onSetSpanOut={() => onSetSpanOut?.(videoAdapter.getMediaState().currentFrame)}
-              onClearSpan={onClearSpan}
+              layerSpans={layerSpans}
+              onLayerSpanChange={onLayerSpanChange}
+              viewWindow={spanViewWindow}
               onKeyframeClick={(_layerId, frame) => {
                 const totalFrames = videoAdapter.getMediaState().duration ? Math.round(videoAdapter.getMediaState().duration * videoAdapter.getMediaState().frameRate) : 1
                 videoAdapter.previewSeekToProgress(frame / totalFrames)

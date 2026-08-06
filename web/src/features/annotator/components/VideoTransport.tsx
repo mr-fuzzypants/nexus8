@@ -1,6 +1,7 @@
-import { useEffect, useState, type KeyboardEvent } from 'react'
+import { useEffect, useState } from 'react'
 import type { VideoViewerAdapter } from '../core/viewers/videoAdapter'
 import { FilmstripScrubber, type FrameSpan } from './FilmstripScrubber'
+import { SpanFrameInput } from './SpanFrameInput'
 
 /** Render a SMPTE-ish timecode (mm:ss:ff) from a time in seconds + frame rate. */
 function formatTimecode(seconds: number, frameRate: number) {
@@ -15,64 +16,6 @@ function formatTimecode(seconds: number, frameRate: number) {
 }
 
 /**
- * Frame-number field for one end of the span. Keeps its own text while focused
- * so typing isn't fought by re-renders; commits on Enter/blur, reverts on
- * Escape or invalid input.
- */
-function SpanFrameInput({
-  value,
-  placeholder,
-  label,
-  onCommit,
-}: {
-  value: number | null
-  placeholder: string
-  label: string
-  onCommit: (frame: number) => void
-}) {
-  const [text, setText] = useState<string | null>(null)
-  const displayed = text ?? (value != null ? String(value) : '')
-
-  const commit = () => {
-    if (text != null && text.trim() !== '') {
-      const parsed = Number(text)
-      if (Number.isFinite(parsed)) {
-        onCommit(Math.round(parsed))
-      }
-    }
-    setText(null)
-  }
-  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') {
-      event.preventDefault()
-      commit()
-      event.currentTarget.blur()
-    } else if (event.key === 'Escape') {
-      event.preventDefault()
-      setText(null)
-      event.currentTarget.blur()
-    }
-  }
-
-  return (
-    <input
-      className="video-transport__span-input"
-      type="number"
-      min={0}
-      inputMode="numeric"
-      placeholder={placeholder}
-      aria-label={label}
-      title={label}
-      value={displayed}
-      onChange={(event) => setText(event.currentTarget.value)}
-      onFocus={() => setText(displayed)}
-      onBlur={commit}
-      onKeyDown={handleKeyDown}
-    />
-  )
-}
-
-/**
  * Playback transport for the frame-accurate video adapter: play/pause, single-frame
  * stepping, a filmstrip scrub bar, and a live timecode/frame readout. Subscribes to
  * the adapter so it re-renders on every frame callback during playback. When span
@@ -83,13 +26,17 @@ export function VideoTransport({
   adapter,
   span,
   onSpanChange,
+  zoomToSpan = false,
+  onZoomToSpanChange,
 }: {
   adapter: VideoViewerAdapter
   span?: FrameSpan | null
   onSpanChange?: (span: FrameSpan | null) => void
+  /** Controlled zoom-to-span state — lifted so sibling timelines can share the window. */
+  zoomToSpan?: boolean
+  onZoomToSpanChange?: (zoom: boolean) => void
 }) {
   const [, setVersion] = useState(0)
-  const [zoomToSpan, setZoomToSpan] = useState(false)
 
   useEffect(() => adapter.subscribe?.(() => setVersion((value) => value + 1)), [adapter])
 
@@ -100,16 +47,6 @@ export function VideoTransport({
 
   const spanEnabled = Boolean(onSpanChange)
   const spanActive = span != null && span.end >= span.start
-
-  // Clearing the span drops the zoom back to the full strip (render-time state
-  // adjustment, not an effect, so the reset lands in the same commit).
-  const [prevSpanActive, setPrevSpanActive] = useState(spanActive)
-  if (prevSpanActive !== spanActive) {
-    setPrevSpanActive(spanActive)
-    if (!spanActive) {
-      setZoomToSpan(false)
-    }
-  }
 
   const commitStart = (frame: number) => {
     const next = Math.min(Math.max(frame, 0), lastFrame)
@@ -168,6 +105,7 @@ export function VideoTransport({
             value={span?.start ?? null}
             placeholder="in"
             label="Span start frame"
+            className="video-transport__span-input"
             onCommit={commitStart}
           />
           <span className="video-transport__span-dash">–</span>
@@ -175,6 +113,7 @@ export function VideoTransport({
             value={span?.end ?? null}
             placeholder="out"
             label="Span end frame"
+            className="video-transport__span-input"
             onCommit={commitEnd}
           />
           <button
@@ -186,7 +125,7 @@ export function VideoTransport({
             aria-pressed={zoomToSpan}
             title={zoomToSpan ? 'Show full timeline' : 'Zoom filmstrip to span'}
             aria-label={zoomToSpan ? 'Show full timeline' : 'Zoom filmstrip to span'}
-            onClick={() => setZoomToSpan((value) => !value)}
+            onClick={() => onZoomToSpanChange?.(!zoomToSpan)}
           >
             {zoomToSpan ? '«»' : '»«'}
           </button>

@@ -242,6 +242,35 @@ function AnnotatorWorkspace({
       // Storage unavailable (private mode etc.) — span stays session-only.
     }
   }, [maskSpan, asset.id])
+  // Per-layer propagation spans; a layer with its own span overrides the global
+  // maskSpan when that layer is propagated. Persisted per-asset like maskSpan.
+  const [layerSpans, setLayerSpans] = useState<Record<string, { start: number; end: number }>>(() => {
+    try {
+      const raw = localStorage.getItem(`nexus8.layerSpans.${asset.id}`)
+      const parsed = raw ? JSON.parse(raw) : null
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  })
+  useEffect(() => {
+    try {
+      const key = `nexus8.layerSpans.${asset.id}`
+      if (Object.keys(layerSpans).length > 0) localStorage.setItem(key, JSON.stringify(layerSpans))
+      else localStorage.removeItem(key)
+    } catch {
+      // Storage unavailable (private mode etc.) — spans stay session-only.
+    }
+  }, [layerSpans, asset.id])
+  const setLayerSpan = (layerId: string, span: { start: number; end: number } | null) => {
+    setLayerSpans((prev) => {
+      if (!span) {
+        const { [layerId]: _removed, ...rest } = prev
+        return rest
+      }
+      return { ...prev, [layerId]: span }
+    })
+  }
   // Layers with a propagated mask track; `version` bumps per re-propagation to bust the image cache.
   const [videoMaskTracks, setVideoMaskTracks] = useState<Record<string, { version: number }>>({})
   // Guards the one-time mask-track seeding per asset (see rehydration effect below).
@@ -1148,15 +1177,15 @@ function AnnotatorWorkspace({
       }
 
       // Dispatch to Django → Modal SAM 2. A correction sends its computed span;
-      // otherwise use the user-selected span, else the backend auto-scopes.
+      // otherwise the layer's own span, then the global span, else the backend
+      // auto-scopes.
+      const scopedSpan = opts.span ?? layerSpans[layerId] ?? maskSpan
       const propagatedLayer = maskLayers.find((l) => l.id === layerId)
       const dispatched = await propagateMaskTrack(asset.id, layerId, {
         prompt_frames: promptFrames,
-        propagation_params: opts.span
-          ? { span_start: opts.span.start, span_end: opts.span.end }
-          : maskSpan
-            ? { span_start: maskSpan.start, span_end: maskSpan.end }
-            : { full_clip: true },
+        propagation_params: scopedSpan
+          ? { span_start: scopedSpan.start, span_end: scopedSpan.end }
+          : { full_clip: true },
         layer_name: propagatedLayer?.name,
         layer_color: propagatedLayer?.color,
         source_size: imageDims ?? undefined,
@@ -1165,7 +1194,7 @@ function AnnotatorWorkspace({
       if (abort.signal.aborted) return
 
       const dispatchAt = dispatched.dispatch_at_ms ?? Date.now()
-      const spanStart = dispatched.span_start ?? opts.span?.start ?? maskSpan?.start ?? 0
+      const spanStart = dispatched.span_start ?? scopedSpan?.start ?? 0
 
       // Poll until done. Prefer the backend's phase string (e.g. "Segmenting… 12s"),
       // falling back to a locally-computed elapsed counter.
@@ -1198,8 +1227,8 @@ function AnnotatorWorkspace({
       // Update timeline. A correction keeps the overall propagated span (union
       // with what existed); a fresh run sets it to the processed window.
       const totalFrames = asset.nb_frames ?? (asset.fps && asset.duration ? Math.round(asset.fps * asset.duration) : 240)
-      const segStart = dispatched.span_start ?? opts.span?.start ?? maskSpan?.start ?? 0
-      const segEnd = dispatched.span_end ?? opts.span?.end ?? maskSpan?.end ?? totalFrames - 1
+      const segStart = dispatched.span_start ?? scopedSpan?.start ?? 0
+      const segEnd = dispatched.span_end ?? scopedSpan?.end ?? totalFrames - 1
       const promptedFrameIndices = promptFrames.map((pf) => pf.frame_index)
       setMaskTrackKeyframes((prev) => {
         const merged = new Set([...(prev[layerId] ?? []), ...promptedFrameIndices])
@@ -1852,10 +1881,9 @@ function AnnotatorWorkspace({
           videoFrameRef={videoFrameRef}
           previewMasks={previewMasks}
           maskSpan={maskSpan}
-          onSetSpanIn={(frame) => setMaskSpan((s) => ({ start: frame, end: Math.max(frame, s?.end ?? frame) }))}
-          onSetSpanOut={(frame) => setMaskSpan((s) => ({ start: Math.min(frame, s?.start ?? frame), end: frame }))}
-          onClearSpan={() => setMaskSpan(null)}
           onSpanChange={setMaskSpan}
+          layerSpans={layerSpans}
+          onLayerSpanChange={setLayerSpan}
         />
         {annotatorMode === 'mask' && !is3DModel ? (
           <>
