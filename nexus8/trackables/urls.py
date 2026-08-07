@@ -102,6 +102,12 @@ from .views_video_masks import (
     VideoMaskListView,
     VideoMaskPreviewView,
 )
+from .views_video_ops import (
+    VideoOpCancelView,
+    VideoOpDispatchView,
+    VideoOpJobView,
+    VideoOpRegistryView,
+)
 from .views_intelligence import (
     AssetRelationsView,
     AssetSimilarView,
@@ -141,7 +147,14 @@ urlpatterns = [
     path('api/library/assets/<int:pk>/renders/selected/', LayerSelectedRendersView.as_view(), name='library-asset-renders-selected'),
     path('api/library/assets/<int:pk>/mask/', MaskSaveView.as_view(), name='library-asset-mask'),
     path('api/library/assets/<int:pk>/masks/', AssetMasksView.as_view(), name='library-asset-masks'),
-    # Video mask track endpoints (Phase 1.3)
+    # Generic video operation jobs (segment, remove, …) — see services/video_ops.py
+    path('api/library/video-ops/', VideoOpRegistryView.as_view(), name='library-video-ops-registry'),
+    path('api/library/assets/<str:asset_id>/video-ops/', VideoOpDispatchView.as_view(), name='library-video-ops-dispatch'),
+    path('api/library/assets/<str:asset_id>/video-ops/<uuid:job_id>/', VideoOpJobView.as_view(), name='library-video-ops-job'),
+    path('api/library/assets/<str:asset_id>/video-ops/<uuid:job_id>/cancel/', VideoOpCancelView.as_view(), name='library-video-ops-cancel'),
+    # Video mask track endpoints (Phase 1.3) — propagate/status/cancel are
+    # legacy aliases onto the segment op job service
+
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/propagate/', VideoMaskPropagateView.as_view(), name='library-video-mask-propagate'),
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/status/', VideoMaskStatusView.as_view(), name='library-video-mask-status'),
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/cancel/', VideoMaskCancelView.as_view(), name='library-video-mask-cancel'),

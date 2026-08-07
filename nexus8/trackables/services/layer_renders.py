@@ -92,13 +92,17 @@ def store_run_results(
     guide_version=None,
     guide_role="sketch_guide",
     created_by=None,
+    file_ext="png",
+    content_type="image/png",
 ):
     """
     Store one generation run's outputs as variations vRun.0..vRun.N-1.
 
     Args:
-        png_list: result bytes, one per variation
-        op: generation operation (sketch_inpaint | scribble | erase | inpaint)
+        png_list: result bytes, one per variation (PNG by default;
+            file_ext/content_type override for other media, e.g. mp4 video
+            from the removal op)
+        op: generation operation (sketch_inpaint | scribble | erase | inpaint | remove)
         params: run parameters recorded verbatim in each variation's
             ``generation`` record (prompt, scales, mask_dims, telemetry, ...)
         base_seed: run seed; variation i is recorded as base_seed + i,
@@ -141,9 +145,9 @@ def store_run_results(
             if guide_version is not None:
                 upstream[guide_role] = guide_version
             uploaded = SimpleUploadedFile(
-                f"{render_asset.name}-v{run}.{index}.png",
+                f"{render_asset.name}-v{run}.{index}.{file_ext}",
                 png,
-                content_type="image/png",
+                content_type=content_type,
             )
             version, _ = add_version(
                 render_asset,

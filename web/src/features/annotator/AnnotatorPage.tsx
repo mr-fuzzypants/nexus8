@@ -1260,9 +1260,13 @@ function AnnotatorWorkspace({
 
     } catch (error) {
       if (abort.signal.aborted) return
-      const message = error instanceof Error ? error.message : 'Failed'
+      // Surface the API's error body (e.g. the span-mismatch guidance) over
+      // axios's generic "Request failed with status code 400".
+      const apiError = (error as { response?: { data?: { error?: string } } })
+        ?.response?.data?.error
+      const message = apiError ?? (error instanceof Error ? error.message : 'Failed')
       setMaskGenerateState((s) => ({ ...s, [layerId]: message }))
-      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 3000)
+      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 6000)
     }
   }
 

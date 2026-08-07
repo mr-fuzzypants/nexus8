@@ -1075,6 +1075,18 @@
   pointer-events: none;
 }
 
+/* Playhead outside the zoomed window: clamped at the strip edge, amber warning
+   look — the viewport is showing a frame the strip doesn't display. */
+.filmstrip-scrub__playhead--outside {
+  background: #f59e0b;
+  box-shadow:
+    0 0 0 1px rgba(2, 6, 23, 0.6),
+    0 0 10px rgba(245, 158, 11, 0.9);
+  width: 5px;
+  transform: translateX(-2.5px);
+  pointer-events: auto;
+}
+
 .filmstrip-scrub__shade {
   position: absolute;
   top: 0;

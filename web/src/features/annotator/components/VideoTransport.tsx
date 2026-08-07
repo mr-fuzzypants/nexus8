@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import type { VideoViewerAdapter } from '../core/viewers/videoAdapter'
+import { useEffect, useRef, useState } from 'react'
+import { frameToMidTime, type VideoViewerAdapter } from '../core/viewers/videoAdapter'
 import { FilmstripScrubber, type FrameSpan } from './FilmstripScrubber'
 import { SpanFrameInput } from './SpanFrameInput'
 
@@ -47,6 +47,24 @@ export function VideoTransport({
 
   const spanEnabled = Boolean(onSpanChange)
   const spanActive = span != null && span.end >= span.start
+
+  // Zooming must not strand the playhead outside the window: the viewport
+  // would keep showing an out-of-window frame while the strip displays the
+  // span — masks drawn there get stamped with the unseen frame. On zoom
+  // activation, seek to the nearest in-window frame. (Activation only: span
+  // edits while zoomed already live-preview the dragged handle's frame.)
+  const windowActive = zoomToSpan && spanActive
+  const wasWindowActive = useRef(false)
+  useEffect(() => {
+    const activated = windowActive && !wasWindowActive.current
+    wasWindowActive.current = windowActive
+    if (!activated || !span || totalDuration <= 0) return
+    const frame = adapter.getMediaState().currentFrame
+    if (frame < span.start || frame > span.end) {
+      const clamped = Math.min(Math.max(frame, span.start), span.end)
+      adapter.seekToProgress(frameToMidTime(clamped, fps) / totalDuration)
+    }
+  }, [windowActive, span, adapter, fps, totalDuration])
 
   const commitStart = (frame: number) => {
     const next = Math.min(Math.max(frame, 0), lastFrame)

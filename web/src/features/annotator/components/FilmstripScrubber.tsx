@@ -374,7 +374,11 @@ export function FilmstripScrubber({
 
   const globalProgress = totalDuration > 0 ? clamp(media.playlistCurrentTime / totalDuration, 0, 1) : 0
   const playheadPosition = windowPosition(media.playlistCurrentTime)
-  const playheadVisible =
+  // When the playhead falls outside the zoomed window it stays visible,
+  // clamped to the edge with a distinct style — hiding it entirely lets the
+  // viewport silently show an out-of-window frame (masks drawn there get
+  // stamped with a frame the artist never saw on the strip).
+  const playheadInWindow =
     media.playlistCurrentTime >= windowStartTime - 0.5 / fps &&
     media.playlistCurrentTime <= windowStartTime + windowDuration + 0.5 / fps
   const startEdgePosition = windowPosition(handleFrames.start / fps)
@@ -410,9 +414,17 @@ export function FilmstripScrubber({
           />
         </>
       ) : null}
-      {playheadVisible ? (
-        <div className="filmstrip-scrub__playhead" style={{ left: `${playheadPosition * 100}%` }} />
-      ) : null}
+      <div
+        className={`filmstrip-scrub__playhead${
+          playheadInWindow ? '' : ' filmstrip-scrub__playhead--outside'
+        }`}
+        style={{ left: `${playheadPosition * 100}%` }}
+        title={
+          playheadInWindow
+            ? undefined
+            : `Playhead at f${media.currentFrame} — outside the zoomed window`
+        }
+      />
       {spanEnabled ? (
         <>
           <div

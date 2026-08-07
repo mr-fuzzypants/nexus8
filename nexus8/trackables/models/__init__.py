@@ -98,6 +98,9 @@ from .mask_tracks import (
     MaskTrack,
     MaskTrackManager,
 )
+from .operations import (
+    OperationJob,
+)
 
 __all__ = [
     "AI_STATUS_CHOICES",
@@ -125,6 +128,7 @@ __all__ = [
     "MediaAsset",
     "ModelCheckpoint",
     "NodegraphWorkflow",
+    "OperationJob",
     "RunIntent",
     "PROJECT_STATUSES",
     "Project",
