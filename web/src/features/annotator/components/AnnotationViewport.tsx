@@ -132,6 +132,9 @@ interface ViewportProps {
   maskTrackSegments?: Record<string, Array<{ startFrame: number; endFrame: number; type: 'propagated' | 'lowConfidence' }>>
   assetId?: number
   videoMaskTracks?: Record<string, { version: number }>
+  /** Completed generative removals: the result clip overlays the source for
+   *  its span while the layer's Image toggle is on (hold C to compare). */
+  videoRemovals?: Record<string, { filePath: string; spanStart: number; spanEnd: number }>
   maskOverlayOpacity?: number
   promptDisplay?: 'result' | 'edit' | 'soloNeg'
   videoFrameRef?: { current: number }
@@ -229,6 +232,7 @@ export function AnnotationViewport({
   maskTrackSegments,
   assetId,
   videoMaskTracks,
+  videoRemovals,
   maskOverlayOpacity = 0.45,
   promptDisplay = 'result',
   videoFrameRef,
@@ -262,6 +266,13 @@ export function AnnotationViewport({
   const maskImgCacheRef = useRef<Map<string, HTMLImageElement | 'loading' | 'empty'>>(new Map())
   const maskTintCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const [maskTick, setMaskTick] = useState(0)
+  // Removal-result playback: one hidden <video> per layer with a completed
+  // removal, drawn into the canvas in place of the source for its span.
+  const removalVideoCacheRef = useRef(new Map<string, HTMLVideoElement>())
+  // Hold C to flicker-compare: suppresses the result overlay so the original
+  // shows underneath (the classic spot-the-artifact comparison). The key
+  // listener effect lives below videoAdapter's declaration.
+  const removalCompareHeldRef = useRef(false)
   // Dedicated layer for the generation-in-progress marching-ants border: the
   // main overlay only redraws on state changes, so the animation gets its own
   // canvas + rAF loop instead of forcing full scene redraws every frame.
@@ -313,6 +324,33 @@ export function AnnotationViewport({
     () => ('getMediaState' in adapter ? (adapter as VideoViewerAdapter) : null),
     [adapter],
   )
+
+  // Hold C to flicker-compare a removal result against the original.
+  useEffect(() => {
+    if (!videoAdapter || !videoRemovals || Object.keys(videoRemovals).length === 0) return
+    const isTyping = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      return Boolean(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable))
+    }
+    const down = (e: KeyboardEvent) => {
+      if ((e.key === 'c' || e.key === 'C') && !e.repeat && !isTyping(e)) {
+        removalCompareHeldRef.current = true
+        setMaskTick((t) => t + 1)
+      }
+    }
+    const up = (e: KeyboardEvent) => {
+      if (e.key === 'c' || e.key === 'C') {
+        removalCompareHeldRef.current = false
+        setMaskTick((t) => t + 1)
+      }
+    }
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+    }
+  }, [videoAdapter, videoRemovals])
 
   const activeMaskLayer = useMemo(
     () => (activeMaskLayerId ? maskLayers?.find((layer) => layer.id === activeMaskLayerId) : undefined),
@@ -1080,8 +1118,70 @@ export function AnnotationViewport({
           w: Math.abs(br.x - tl.x),
           h: Math.abs(br.y - tl.y),
         }
+
+        // Removal-result overlay: draw the generated clip over the source for
+        // its span (Image toggle gates it; hold C to compare). The hidden
+        // video element is frame-synced to the transport — seek-follow while
+        // paused/scrubbing, play/drift-correct during playback.
+        const removalShown = new Set<string>()
+        if (videoRemovals && !removalCompareHeldRef.current) {
+          const media = videoAdapter.getMediaState()
+          const fps = Math.max(media.frameRate, 1)
+          for (const layer of maskLayers) {
+            const removal = videoRemovals[layer.id]
+            if (!removal || layer.render_visible === false) continue
+            if (currentFrame < removal.spanStart || currentFrame > removal.spanEnd) continue
+            let v = removalVideoCacheRef.current.get(layer.id)
+            if (!v || v.dataset.src !== removal.filePath) {
+              v?.pause()
+              v = document.createElement('video')
+              v.muted = true
+              v.playsInline = true
+              v.preload = 'auto'
+              v.src = removal.filePath
+              v.dataset.src = removal.filePath
+              v.addEventListener('loadeddata', () => setMaskTick((t) => t + 1))
+              v.addEventListener('seeked', () => setMaskTick((t) => t + 1))
+              removalVideoCacheRef.current.set(layer.id, v)
+            }
+            const target = (currentFrame - removal.spanStart + 0.5) / fps
+            if (media.playing) {
+              if (v.paused) {
+                v.currentTime = target
+                void v.play()
+              } else if (Math.abs(v.currentTime - target) > 2.5 / fps) {
+                v.currentTime = target
+              }
+            } else {
+              if (!v.paused) v.pause()
+              if (Math.abs(v.currentTime - target) > 0.6 / fps) v.currentTime = target
+            }
+            if (v.readyState >= 2) {
+              context.drawImage(v, rect.x, rect.y, rect.w, rect.h)
+              removalShown.add(layer.id)
+              context.save()
+              context.font = '10px system-ui, sans-serif'
+              const label = 'RESULT · hold C to compare'
+              const tw = context.measureText(label).width
+              context.fillStyle = 'rgba(2, 6, 23, 0.65)'
+              context.fillRect(rect.x + rect.w - tw - 14, rect.y + 6, tw + 10, 16)
+              context.fillStyle = '#5eead4'
+              context.fillText(label, rect.x + rect.w - tw - 9, rect.y + 17)
+              context.restore()
+            }
+          }
+        } else if (removalCompareHeldRef.current) {
+          // Comparing: keep results paused so release resumes in sync.
+          for (const v of removalVideoCacheRef.current.values()) {
+            if (!v.paused) v.pause()
+          }
+        }
+
         for (const layer of maskLayers) {
           if (!layer.visible) continue
+          // The object is gone in the shown result — tinting its old mask
+          // over the fill would just be noise.
+          if (removalShown.has(layer.id)) continue
           const track = videoMaskTracks[layer.id]
           // An interactive preview for this exact frame supersedes the track
           // mask — it's the live click→refine state the artist is building.
@@ -1209,7 +1309,7 @@ export function AnnotationViewport({
       }
       context.restore()
     }
-  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, assetId, brushNegativeArmed, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, layerRenders, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskLayers, maskOverlayOpacity, maskPreviewMode, maskTick, participants, previewMasks, projectionHost, promptDisplay, refImageTick, selectedId, videoAdapter, videoMaskTracks, viewport, visibleAnnotations])
+  }, [activeMaskLayer, activeTool, adapter, adapterVersion, annotatorMode, assetId, brushNegativeArmed, brushPointerPos, brushScreenRadiusPx, dragPreview, draft, imageDims, inlineEditorId, isInlineEditorOpen, isViewerReady, layerRenders, liveGenBusy, liveGenLatencyS, livePreviewImage, livePreviewIsScribble, livePreviewRegion, maskLayers, maskOverlayOpacity, maskPreviewMode, maskTick, participants, previewMasks, projectionHost, promptDisplay, refImageTick, selectedId, videoAdapter, videoMaskTracks, videoRemovals, viewport, visibleAnnotations])
 
   // Marching-ants border while a generation is in flight. Runs on its own
   // canvas so the 60fps dash animation never triggers React re-renders or full

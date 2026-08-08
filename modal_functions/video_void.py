@@ -55,7 +55,11 @@ def _download_weights():
     from huggingface_hub import hf_hub_download, snapshot_download
 
     snapshot_download(BASE_MODEL_REPO, local_dir=BASE_MODEL_DIR)
+    # Both passes: pass 1 = quadmask inpainting, pass 2 = warped-noise
+    # refinement (long-sequence residue cleanup, gated on span > one window).
     hf_hub_download(VOID_WEIGHTS_REPO, "void_pass1.safetensors",
+                    local_dir=VOID_WEIGHTS_DIR)
+    hf_hub_download(VOID_WEIGHTS_REPO, "void_pass2.safetensors",
                     local_dir=VOID_WEIGHTS_DIR)
 
 
@@ -87,7 +91,10 @@ def _fit_sample_size(width: int, height: int) -> str:
     return f"{h}x{w}"
 
 
-@app.cls(image=image, gpu=GPU, timeout=3600, scaledown_window=240)
+# Short scaledown: predict_v2v.py is subprocessed per job, so the 5B model
+# reloads every call regardless — warm idle buys only container boot, while
+# costing idle A100-minutes.
+@app.cls(image=image, gpu=GPU, timeout=3600, scaledown_window=60)
 class VoidRemover:
     """VOID pass-1 quadmask removal via the upstream inference script.
 
@@ -120,9 +127,13 @@ class VoidRemover:
                 "sample_size": str | None,    # "HxW" override
             }
 
+        Spans over 85 frames are split into independent ≤85-frame windows and
+        concatenated (SRED F22a) — this avoids VOID's multi-window blending
+        ghost without the Go-with-the-Flow pass-2 toolchain.
+
         Returns:
             {"video_mp4_b64", "frames_processed", "width", "height",
-             "latency_s", "gen_latency_s"}
+             "latency_s", "gen_latency_s", "passes", "windows"}
         """
         import numpy as np
         from PIL import Image as PILImage
@@ -144,81 +155,106 @@ class VoidRemover:
             fps = float(params.get("fps") or 24.0)
             dilate_px = int(params.get("mask_dilate_px", 0))
 
-            # ── Per-sequence input directory (VOID's expected layout) ──────
-            seq = "nexus8-job"
-            seq_dir = work / "data" / seq
-            seq_dir.mkdir(parents=True)
+            # ── Independent ≤WINDOW-frame windows (SRED F22a fix) ──────────
+            # VOID internally blends overlapping 85-frame windows via
+            # multidiffusion across a long clip, which leaves a faint
+            # moving-subject ghost (F22a). Instead we split the span into
+            # INDEPENDENT ≤85-frame sequences — each single-window-clean like
+            # F22 — run them in one VOID invocation (comma-joined run_seqs =
+            # one model load), and concatenate. Trade-off: possible seam at
+            # window boundaries (independent fills); a shared seed/prompt
+            # keeps them consistent. This is the chosen alternative to the
+            # Go-with-the-Flow pass-2 toolchain.
+            import math
 
-            # input_video.mp4 — lossless-ish encode of the staged frames.
-            enc_dir = work / "rgb"
-            enc_dir.mkdir()
-            for i, p in enumerate(frame_paths):
-                shutil.copy(p, enc_dir / f"f_{i:06d}.jpg")
-            subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps),
-                 "-i", str(enc_dir / "f_%06d.jpg"),
-                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "10",
-                 str(seq_dir / "input_video.mp4")],
-                check=True,
-            )
+            WINDOW = 85
+            n_chunks = max(1, math.ceil(n / WINDOW))
+            base, rem = divmod(n, n_chunks)
+            bounds, cursor = [], 0
+            for ci in range(n_chunks):
+                ln = base + (1 if ci < rem else 0)
+                bounds.append((cursor, cursor + ln))
+                cursor += ln
 
-            # quadmask_0.mp4 — 0=remove, 255=keep; lossless luma so the
-            # 4-level semantics survive encoding. Interaction/overlap regions
-            # left empty on the first pass (plan 2.3).
-            qm_dir = work / "qm"
-            qm_dir.mkdir()
-            masked_frames = 0
-            for i in range(n):
-                mp = mask_by_index.get(i)
-                if mp:
-                    m = PILImage.open(mp)
-                    m = m.getchannel("A") if m.mode == "RGBA" else m.convert("L")
-                    if m.size != (src_w, src_h):
-                        m = m.resize((src_w, src_h), PILImage.NEAREST)
-                    if dilate_px > 0:
-                        m = m.filter(ImageFilter.MaxFilter(dilate_px * 2 + 1))
-                    obj = np.array(m) > 127
-                    masked_frames += bool(obj.any())
-                else:
-                    obj = np.zeros((src_h, src_w), dtype=bool)
-                quad = np.full((src_h, src_w), 255, dtype="uint8")
-                quad[obj] = 0
-                PILImage.fromarray(quad).save(qm_dir / f"f_{i:06d}.png")
-            subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps),
-                 "-i", str(qm_dir / "f_%06d.png"),
-                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-qp", "0",
-                 str(seq_dir / "quadmask_0.mp4")],
-                check=True,
-            )
-
-            (seq_dir / "prompt.json").write_text(
-                json.dumps({"bg": params.get("prompt") or ""})
-            )
-
+            data_root = work / "data"
             sample_size = params.get("sample_size") or _fit_sample_size(src_w, src_h)
+            seed = params.get("seed")
+            masked_frames = 0
+            seq_names = []
+            for ci, (cs, ce) in enumerate(bounds):
+                seq = f"nexus8-job-c{ci:02d}"
+                seq_names.append(seq)
+                seq_dir = data_root / seq
+                seq_dir.mkdir(parents=True)
+
+                # input_video.mp4 — lossless-ish encode of this window's frames.
+                rgb = work / f"rgb{ci}"
+                rgb.mkdir()
+                for j, gi in enumerate(range(cs, ce)):
+                    shutil.copy(frame_paths[gi], rgb / f"f_{j:06d}.jpg")
+                subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps),
+                     "-i", str(rgb / "f_%06d.jpg"),
+                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "10",
+                     str(seq_dir / "input_video.mp4")],
+                    check=True,
+                )
+
+                # quadmask_0.mp4 — 0=remove, 255=keep; lossless luma so the
+                # 4-level semantics survive encoding. Interaction/overlap
+                # regions left empty on the first pass (plan 2.3).
+                qm = work / f"qm{ci}"
+                qm.mkdir()
+                for j, gi in enumerate(range(cs, ce)):
+                    mp = mask_by_index.get(gi)
+                    if mp:
+                        m = PILImage.open(mp)
+                        m = m.getchannel("A") if m.mode == "RGBA" else m.convert("L")
+                        if m.size != (src_w, src_h):
+                            m = m.resize((src_w, src_h), PILImage.NEAREST)
+                        if dilate_px > 0:
+                            m = m.filter(ImageFilter.MaxFilter(dilate_px * 2 + 1))
+                        obj = np.array(m) > 127
+                        masked_frames += bool(obj.any())
+                    else:
+                        obj = np.zeros((src_h, src_w), dtype=bool)
+                    quad = np.full((src_h, src_w), 255, dtype="uint8")
+                    quad[obj] = 0
+                    PILImage.fromarray(quad).save(qm / f"f_{j:06d}.png")
+                subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps),
+                     "-i", str(qm / "f_%06d.png"),
+                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-qp", "0",
+                     str(seq_dir / "quadmask_0.mp4")],
+                    check=True,
+                )
+
+                (seq_dir / "prompt.json").write_text(
+                    json.dumps({"bg": params.get("prompt") or ""})
+                )
+
             out_dir = work / "out"
             cmd = [
                 "python", f"{VOID_SRC}/inference/cogvideox_fun/predict_v2v.py",
                 "--config", f"{VOID_SRC}/config/quadmask_cogvideox.py",
-                f"--config.data.data_rootdir={work / 'data'}",
-                f"--config.experiment.run_seqs={seq}",
+                f"--config.data.data_rootdir={data_root}",
+                f"--config.experiment.run_seqs={','.join(seq_names)}",
                 f"--config.experiment.save_path={out_dir}",
                 f"--config.video_model.model_name={BASE_MODEL_DIR}",
                 f"--config.video_model.transformer_path={VOID_WEIGHTS_DIR}/void_pass1.safetensors",
                 f"--config.data.sample_size={sample_size}",
-                f"--config.data.max_video_length={n}",
+                f"--config.data.max_video_length={WINDOW}",
                 # abseil int flag — floats are rejected at parse time.
                 f"--config.data.fps={int(round(fps))}",
                 f"--config.video_model.num_inference_steps={int(params.get('num_inference_steps', 50))}",
                 f"--config.video_model.guidance_scale={float(params.get('guidance_scale', 1.0))}",
             ]
-            seed = params.get("seed")
             if seed is not None:
                 cmd.append(f"--config.system.seed={int(seed)}")
 
-            print(f"{n} frames {src_w}x{src_h} → sample_size {sample_size}, "
-                  f"{masked_frames} with mask; launching VOID pass 1 …")
+            print(f"{n} frames {src_w}x{src_h} → {n_chunks} window(s) "
+                  f"{[e - s for s, e in bounds]}, sample_size {sample_size}, "
+                  f"{masked_frames} masked; launching VOID …")
             t_gen = time.time()
             proc = subprocess.run(cmd, cwd=VOID_SRC, capture_output=True, text=True)
             # Surface the tail of both streams — the script's own logging is
@@ -232,20 +268,40 @@ class VoidRemover:
                 )
             gen_latency = time.time() - t_gen
 
-            results = [p for p in out_dir.rglob("*.mp4")
-                       if not p.name.endswith("_tuple.mp4")]
-            if not results:
-                raise RuntimeError(
-                    f"VOID produced no output mp4 in {out_dir}; "
-                    f"stdout tail: {proc.stdout[-500:]}"
-                )
-            mp4_bytes = results[0].read_bytes()
+            # Collect each window's output in order; concatenate to one clip.
+            chunk_mp4s = []
+            for seq in seq_names:
+                cands = [p for p in out_dir.rglob("*.mp4")
+                         if p.name.startswith(seq) and not p.name.endswith("_tuple.mp4")]
+                if not cands:
+                    raise RuntimeError(
+                        f"VOID produced no output for window {seq} in {out_dir}; "
+                        f"stdout tail: {proc.stdout[-500:]}"
+                    )
+                chunk_mp4s.append(cands[0])
 
-            # Probe output dims for the caller.
+            if len(chunk_mp4s) == 1:
+                mp4_bytes = chunk_mp4s[0].read_bytes()
+            else:
+                concat_list = work / "concat.txt"
+                concat_list.write_text("".join(f"file '{p}'\n" for p in chunk_mp4s))
+                final_mp4 = work / "final.mp4"
+                subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat",
+                     "-safe", "0", "-i", str(concat_list),
+                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
+                     str(final_mp4)],
+                    check=True,
+                )
+                mp4_bytes = final_mp4.read_bytes()
+            gen2_latency = 0.0
+            passes = 1
+
+            # Probe output dims for the caller (all windows share dims).
             probe = subprocess.run(
                 ["ffprobe", "-v", "error", "-select_streams", "v:0",
                  "-show_entries", "stream=width,height", "-of", "json",
-                 str(results[0])],
+                 str(chunk_mp4s[0])],
                 capture_output=True, text=True,
             )
             dims = {}
@@ -256,8 +312,9 @@ class VoidRemover:
                 pass
 
             latency = time.time() - t0
-            print(f"done: {n} frames, {len(mp4_bytes) / 1e6:.1f} MB mp4, "
-                  f"total {latency:.1f}s (gen {gen_latency:.1f}s)")
+            print(f"done: {n} frames, {n_chunks} window(s), "
+                  f"{len(mp4_bytes) / 1e6:.1f} MB mp4, total {latency:.1f}s "
+                  f"(gen {gen_latency:.1f}s)")
             return {
                 "video_mp4_b64": base64.b64encode(mp4_bytes).decode(),
                 "frames_processed": n,
@@ -265,6 +322,9 @@ class VoidRemover:
                 **dims,
                 "latency_s": latency,
                 "gen_latency_s": gen_latency,
+                "gen2_latency_s": gen2_latency,
+                "passes": passes,
+                "windows": n_chunks,
             }
         finally:
             shutil.rmtree(frames_dir, ignore_errors=True)

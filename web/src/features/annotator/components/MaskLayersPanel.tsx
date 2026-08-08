@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Eye, EyeOff, ChevronUp, ChevronDown, Image, ImageOff, Plus, Trash2, Wand2, Stethoscope } from 'lucide-react'
+import { Eye, EyeOff, ChevronUp, ChevronDown, Eraser, Image, ImageOff, Plus, Trash2, Wand2, Stethoscope } from 'lucide-react'
 import type { AnnotationLayer } from '../core/annotations/types'
 
 interface MaskLayersPanelProps {
@@ -19,6 +19,8 @@ interface MaskLayersPanelProps {
   onPropagateMask?: (id: string) => void
   /** Span-limited re-propagation from the earliest edited frame. */
   onCorrectMask?: (id: string) => void
+  /** Generative removal of the tracked object (tier from the layer's Gen mode). */
+  onRemoveObject?: (id: string) => void
   /** Layer ids that already have a propagated track (enables Correct). */
   trackedLayerIds?: Record<string, boolean>
   /** SAM 2 prompt kind for video propagation: 'points' (clicks) or 'mask'
@@ -54,6 +56,7 @@ export function MaskLayersPanel({
   onGenerateMask,
   onPropagateMask,
   onCorrectMask,
+  onRemoveObject,
   trackedLayerIds,
   promptMode = 'points',
   onPromptModeChange,
@@ -269,6 +272,17 @@ export function MaskLayersPanel({
                           onClick={() => onCorrectMask(layer.id)}
                         >
                           <Stethoscope size={13} strokeWidth={2} />
+                        </button>
+                      ) : null}
+                      {trackedLayerIds?.[layer.id] && onRemoveObject ? (
+                        <button
+                          type="button"
+                          className="mask-layers-panel__action"
+                          title="Remove the tracked object (generative fill; tier from the layer's Gen mode, prompt = background description)"
+                          disabled={generateState === 'working'}
+                          onClick={() => onRemoveObject(layer.id)}
+                        >
+                          <Eraser size={13} strokeWidth={2} />
                         </button>
                       ) : null}
                     </>

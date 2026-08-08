@@ -38,7 +38,8 @@ import {
   type AnnotationDoc,
 } from './annotatorApi'
 import { getVersionHistory } from '../../api/versions'
-import { propagateMaskTrack, getMaskTrackStatus, listMaskTracks, deleteMaskTrack, maskFrameUrl, previewMask, type PromptFrame } from '../../api/videoMasks'
+import { propagateMaskTrack, getMaskTrackStatus, getMaskTrackInfo, listMaskTracks, deleteMaskTrack, maskFrameUrl, previewMask, type PromptFrame } from '../../api/videoMasks'
+import { dispatchVideoOp, getVideoOpJob } from '../../api/videoOps'
 import { isMaskShape, rasterizeMask, rasterizeMaskPromptB64, rasterizeCorrectionMaskB64, rasterizeScribble, rasterizeSketchInpaintGuide } from './rasterizeMask'
 import { computeMaskBounds } from './maskBounds'
 import { MaskLayersPanel } from './components/MaskLayersPanel'
@@ -273,6 +274,15 @@ function AnnotatorWorkspace({
   }
   // Layers with a propagated mask track; `version` bumps per re-propagation to bust the image cache.
   const [videoMaskTracks, setVideoMaskTracks] = useState<Record<string, { version: number }>>({})
+  // Completed generative removals per layer: the result clip (native-res
+  // composite) the viewport overlays during playback when the layer's Image
+  // toggle is on. Session-only; rerunning Remove replaces the entry.
+  const [videoRemovals, setVideoRemovals] = useState<Record<string, {
+    filePath: string
+    spanStart: number
+    spanEnd: number
+  }>>({})
+  const removalAbortRef = useRef<Record<string, AbortController>>({})
   // Guards the one-time mask-track seeding per asset (see rehydration effect below).
   const maskSeededRef = useRef<string | null>(null)
   // SAM 2 prompt kind: 'points' = clicks (less work, SAM infers extent);
@@ -1270,6 +1280,80 @@ function AnnotatorWorkspace({
     }
   }
 
+  /** Generative removal (Phase 2): send the layer's mask track through the
+   *  remove op and overlay the resulting clip via the Image toggle. Tier maps
+   *  from the layer's Gen mode — fast = VACE preview; anything else = VOID
+   *  quality, the tier that survives contextually-implied subjects (F21a).
+   *  The prompt should DESCRIBE the occluded background, not instruct. */
+  async function runRemoval(layerId: string) {
+    const layer = maskLayers.find((l) => l.id === layerId)
+    if (!layer) return
+    removalAbortRef.current[layerId]?.abort()
+    const abort = new AbortController()
+    removalAbortRef.current[layerId] = abort
+    setMaskGenerateState((s) => ({ ...s, [layerId]: 'working' }))
+    try {
+      const info = await getMaskTrackInfo(asset.id, layerId)
+      if (!info.exists || !info.version_id) {
+        setMaskGenerateState((s) => ({ ...s, [layerId]: 'Propagate first' }))
+        window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
+        return
+      }
+      const tier = layer.gen_mode === 'fast' ? 'fast' : 'quality'
+      const dispatched = await dispatchVideoOp(asset.id, {
+        op: 'remove',
+        layer_id: layerId,
+        inputs: { mask_track_version_id: info.version_id },
+        params: {
+          tier,
+          prompt: layer.prompt ?? '',
+          negative_prompt: layer.negative_prompt,
+          seed: layer.seed,
+        },
+      })
+      if (abort.signal.aborted) return
+
+      let status = await getVideoOpJob(asset.id, dispatched.job_id)
+      while (status.status === 'working') {
+        setMaskGenerateState((s) => ({ ...s, [layerId]: status.progress ?? 'Removing…' }))
+        await new Promise((r) => window.setTimeout(r, 3000))
+        if (abort.signal.aborted) return
+        status = await getVideoOpJob(asset.id, dispatched.job_id)
+      }
+      if (abort.signal.aborted) return
+      if (status.status !== 'done' || !status.file_path) {
+        throw new Error(status.error || 'Removal failed')
+      }
+
+      const spanStart = status.span_start ?? 0
+      setVideoRemovals((prev) => ({
+        ...prev,
+        [layerId]: {
+          filePath: status.file_path!,
+          spanStart,
+          // frames_processed can undercut the dispatched span (VACE trims to
+          // its window multiple) — the overlay must not outrun the clip.
+          spanEnd: status.frames_processed != null
+            ? spanStart + status.frames_processed - 1
+            : status.span_end ?? spanStart,
+        },
+      }))
+      // Make the result visible immediately: the Image toggle gates the overlay.
+      if (layer.render_visible === false) {
+        room.store.upsertLayer({ ...layer, render_visible: true })
+      }
+      const latencyStr = status.latency_s != null ? ` · ${status.latency_s.toFixed(0)}s` : ''
+      setMaskGenerateState((s) => ({ ...s, [layerId]: `Removed ${status.frames_processed ?? ''}f${latencyStr}` }))
+      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 4000)
+    } catch (error) {
+      if (abort.signal.aborted) return
+      const apiError = (error as { response?: { data?: { error?: string } } })?.response?.data?.error
+      const message = apiError ?? (error instanceof Error ? error.message : 'Failed')
+      setMaskGenerateState((s) => ({ ...s, [layerId]: message }))
+      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 6000)
+    }
+  }
+
   /** Dispatch the layer's mask_op to its generation runner. No-op when the op
    *  is unrunnable or a required prompt is missing. Shared by live stroke-commit
    *  generation and the explicit Regenerate button. */
@@ -1880,6 +1964,7 @@ function AnnotatorWorkspace({
           maskTrackSegments={maskTrackSegments}
           assetId={asset.id}
           videoMaskTracks={videoMaskTracks}
+          videoRemovals={videoRemovals}
           maskOverlayOpacity={maskOverlayOpacity}
           promptDisplay={promptDisplay}
           videoFrameRef={videoFrameRef}
@@ -1913,6 +1998,7 @@ function AnnotatorWorkspace({
               onGenerateMask={handleGenerateMaskForLayer}
               onPropagateMask={handlePropagateMaskTrack}
               onCorrectMask={handleCorrectMaskTrack}
+              onRemoveObject={isVideo ? runRemoval : undefined}
               trackedLayerIds={Object.fromEntries(Object.keys(videoMaskTracks).map((id) => [id, true]))}
               promptMode={maskPromptMode}
               onPromptModeChange={setMaskPromptMode}
@@ -1955,6 +2041,7 @@ function AnnotatorWorkspace({
             {activeMaskLayerId && sidebarTab === 'params' ? (
               <MaskLayerDetailPanel
                 layer={maskLayers.find((l) => l.id === activeMaskLayerId) ?? null}
+                isVideo={isVideo}
                 onUpdate={(fields) => handleUpdateMaskLayer(activeMaskLayerId, fields)}
                 onRegenerate={() => handleRegenerateLayer(activeMaskLayerId)}
                 busy={liveGenStatus.phase === 'saving' || liveGenStatus.phase === 'generating'}

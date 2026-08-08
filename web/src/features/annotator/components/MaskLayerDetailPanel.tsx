@@ -28,9 +28,12 @@ interface Props {
   /** Bump to force the local slider state to re-sync from the layer (e.g. after
    *  a history recipe is applied — layer switch is the only other sync point). */
   resyncKey?: number
+  /** Video mask layer: hide still-image op machinery; prompt + tier feed the
+   *  Remove action (services/video_ops.py remove op). */
+  isVideo?: boolean
 }
 
-export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, lastSeed, resyncKey }: Props) {
+export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, lastSeed, resyncKey, isVideo }: Props) {
   // Local slider state avoids the slider snapping back during the Yjs round-trip
   // (onChange → upsertLayer → setSnapshot → re-render). Syncs from props on layer switch.
   const [controlnetScale, setControlnetScale] = useState(layer?.controlnet_scale ?? 0.4)
@@ -57,31 +60,34 @@ export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, last
     <div className="mask-layer-detail-panel">
       <div className="mask-layer-detail-panel__title">{layer.name}</div>
 
-      <label className="mask-layer-detail-panel__field">
-        <span className="mask-layer-detail-panel__label">Operation</span>
-        <select
-          className="mask-layer-detail-panel__select"
-          value={layer.mask_op ?? ''}
-          onChange={(e) =>
-            // Steps ranges differ per op (scribble 1–8, sketch inpaint 10–50),
-            // so reset to the new op's default on switch.
-            onUpdate({ mask_op: (e.target.value as MaskOp) || undefined, num_inference_steps: undefined })
-          }
-        >
-          <option value="">— none —</option>
-          {MASK_OPS.map((op) => (
-            <option key={op.value} value={op.value}>{op.label}</option>
-          ))}
-        </select>
-      </label>
+      {!isVideo && (
+        <label className="mask-layer-detail-panel__field">
+          <span className="mask-layer-detail-panel__label">Operation</span>
+          <select
+            className="mask-layer-detail-panel__select"
+            value={layer.mask_op ?? ''}
+            onChange={(e) =>
+              // Steps ranges differ per op (scribble 1–8, sketch inpaint 10–50),
+              // so reset to the new op's default on switch.
+              onUpdate({ mask_op: (e.target.value as MaskOp) || undefined, num_inference_steps: undefined })
+            }
+          >
+            <option value="">— none —</option>
+            {MASK_OPS.map((op) => (
+              <option key={op.value} value={op.value}>{op.label}</option>
+            ))}
+          </select>
+        </label>
+      )}
 
-      {!isRemove && (
+      {(isVideo || !isRemove) && (
         <label className="mask-layer-detail-panel__field">
           <span className="mask-layer-detail-panel__label">Prompt</span>
           <textarea
             className="mask-layer-detail-panel__textarea"
             placeholder={
-              isScribble ? 'Describe what to generate from the sketch…'
+              isVideo ? 'For Remove: DESCRIBE the background behind the object (not an instruction)…'
+              : isScribble ? 'Describe what to generate from the sketch…'
               : isSketchInpaint ? 'Describe what to place in the sketched region…'
               : 'Describe what to generate…'
             }
@@ -90,6 +96,35 @@ export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, last
             onChange={(e) => onUpdate({ prompt: e.target.value || undefined })}
           />
         </label>
+      )}
+
+      {isVideo && (
+        <>
+          <label className="mask-layer-detail-panel__field">
+            <span className="mask-layer-detail-panel__label">Negative prompt</span>
+            <textarea
+              className="mask-layer-detail-panel__textarea"
+              placeholder="Fast tier only — e.g. person, figure, silhouette…"
+              value={layer.negative_prompt ?? ''}
+              rows={2}
+              onChange={(e) => onUpdate({ negative_prompt: e.target.value || undefined })}
+            />
+          </label>
+          <label className="mask-layer-detail-panel__field">
+            <span className="mask-layer-detail-panel__label">Removal tier</span>
+            <select
+              className="mask-layer-detail-panel__select"
+              value={layer.gen_mode === 'fast' ? 'fast' : ''}
+              onChange={(e) => onUpdate({ gen_mode: (e.target.value as GenMode) || undefined })}
+            >
+              <option value="">Quality — VOID, true removal (~3–4 min)</option>
+              <option value="fast">Fast — VACE preview (~1–2 min; re-fills implied subjects)</option>
+            </select>
+            <span style={{ fontSize: 11, color: 'rgba(148,163,184,0.5)' }}>
+              Removing a person or anything the scene implies? Use Quality.
+            </span>
+          </label>
+        </>
       )}
 
       {isSketchInpaint && (
@@ -401,7 +436,7 @@ export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, last
         </div>
       )}
 
-      {!isScribble && !isRemove && (
+      {!isVideo && !isScribble && !isRemove && (
         <>
           <label className="mask-layer-detail-panel__field">
             <span className="mask-layer-detail-panel__label">Generation</span>
@@ -429,13 +464,13 @@ export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, last
         </>
       )}
 
-      {isRemove && (
+      {!isVideo && isRemove && (
         <p style={{ fontSize: 11, color: 'rgba(148,163,184,0.5)', margin: '4px 0 0' }}>
           BigLaMa GAN fill — no prompt needed
         </p>
       )}
 
-      {isRunnable && onRegenerate && (
+      {!isVideo && isRunnable && onRegenerate && (
         <div className="mask-layer-detail-panel__field">
           <button
             type="button"

@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 SEGMENT_MODAL_APP = "nexus8-videoseg"
 REMOVE_MODAL_APP = "nexus8-videoremove"
 VOID_MODAL_APP = "nexus8-videovoid"
+ERASER_MODAL_APP = "nexus8-videoeraser"
 
 # SAM 2 holds every frame's features in GPU memory, so cap the window we send.
 MAX_SPAN_FRAMES = 600
@@ -49,10 +50,23 @@ REMOVE_TIERS = {
         "app": VOID_MODAL_APP,
         "cls": "VoidRemover",
         "max_frames": 197,
-        "model": "VOID-pass1",
+        "model": "VOID",
         "deploy_hint": "modal deploy modal_functions/video_void.py",
     },
+    # BENCHMARK-ONLY (license quarantine, F23): DiffuEraser is Apache but its
+    # stock prior is ProPainter (S-Lab non-commercial). Never a shipped path
+    # until the prior is swapped for an MIT flow stage (FGT/FGVC).
+    "eraser": {
+        "app": ERASER_MODAL_APP,
+        "cls": "DiffuEraserRemover",
+        "max_frames": 250,
+        "model": "DiffuEraser+ProPainter-prior",
+        "deploy_hint": "modal deploy modal_functions/video_eraser.py",
+    },
 }
+# VOID's temporal window: spans wider than this cross multiple windows and
+# need pass-2 warped-noise refinement to clear moving-subject residue (F22a).
+VOID_WINDOW_FRAMES = 85
 # Resolution tier used for segmentation; masks are upscaled to native on apply.
 DEFAULT_STAGING_TIER = "preview_480p"
 
@@ -459,6 +473,12 @@ class RemoveOp(VideoOp):
             # VOID dilates the mask itself (dilate_width 11), so no extra
             # dilation by default. No paste-back composite — VOID legitimately
             # changes pixels outside the mask (shadow/reflection removal).
+            #
+            # Multi-window residue (F22a) is handled inside the Modal function
+            # by independent ≤85-frame window chunking + concat — no pass-2
+            # toolchain needed. The app auto-chunks when the span exceeds one
+            # window; nothing to gate here.
+            frame_count = span_end - span_start + 1
             modal_params = {
                 "prompt": job.params.get("prompt") or "",
                 "num_inference_steps": int(job.params.get("num_inference_steps", 50)),
@@ -467,6 +487,17 @@ class RemoveOp(VideoOp):
                 "fps": float(fps),
                 "mask_dilate_px": int(job.params.get("mask_dilate_px", 0)),
                 "sample_size": job.params.get("sample_size"),
+            }
+            if frame_count > VOID_WINDOW_FRAMES:
+                logger.info(f"{tag} {frame_count} frames > {VOID_WINDOW_FRAMES}-frame "
+                            f"window — app will chunk into independent windows")
+        elif tier_name == "eraser":
+            # DiffuEraser is promptless (pure inpainting) and has no seed
+            # control; prompt/negative/seed params are ignored by design.
+            modal_params = {
+                "fps": float(fps),
+                "mask_dilation_iter": int(job.params.get("mask_dilation_iter", 8)),
+                "max_img_size": int(job.params.get("max_img_size", 960)),
             }
         else:
             modal_params = {
@@ -515,6 +546,127 @@ class RemoveOp(VideoOp):
                 502,
             )
 
+    def _composite_native(self, job: OperationJob, result: dict,
+                          mp4_bytes: bytes) -> bytes | None:
+        """Upscale the generated fill into the native-res source frames.
+
+        Both tiers generate at reduced resolution (VACE at the staging tier,
+        VOID at its trained ≤384×672), so the raw result plays soft against
+        the native source. Re-composite server-side: native frames stay
+        pixel-original outside the (dilated) mask; only the fill region is
+        upscaled in. Trade-off: for the quality tier this crops VOID's
+        outside-mask edits (shadow/reflection removal) to the dilated band —
+        `composite_native_dilate_px` widens it, `composite_native: false`
+        keeps the raw model output instead. Returns None on any failure
+        (caller stores the raw result).
+
+        Runs in the poll request thread: ~seconds for typical spans; a
+        197-frame span costs tens of seconds. Move to a worker if the
+        quality tier becomes routine.
+        """
+        import base64 as _b64
+        import io as _io
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        import numpy as np
+        from PIL import Image as PILImage
+        from PIL import ImageFilter
+
+        from ..models import Version
+
+        try:
+            n = int(result.get("frames_processed") or 0)
+            span_start = int(job.inputs["span_start"])
+            fps = float(job.inputs.get("fps") or 24.0)
+            dilate = int(job.params.get("composite_native_dilate_px", 24))
+            if n <= 0:
+                return None
+
+            video_path = resolve_local_path(job.asset.file_path)
+            if not video_path or not os.path.exists(video_path):
+                return None
+            native_dir = VideoFrameStager.extract_frames(
+                video_path,
+                asset_id=str(job.asset_id),
+                version_id=str(job.asset_id),
+                tier="native",
+                frame_range=(span_start, span_start + n - 1),
+            )
+            native_frames = sorted(native_dir.glob("frame_*.jpg"))[:n]
+            if len(native_frames) < n:
+                return None
+
+            mask_version = Version.objects.get(pk=job.inputs["mask_track_version_id"])
+            mask_by_frame = {
+                f["frame_index"]: f["mask_png_b64"]
+                for f in mask_version.data.get("frames", [])
+                if "frame_index" in f and f.get("mask_png_b64")
+            }
+
+            with tempfile.TemporaryDirectory() as td:
+                tdp = Path(td)
+                (tdp / "result.mp4").write_bytes(mp4_bytes)
+                subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error",
+                     "-i", str(tdp / "result.mp4"),
+                     str(tdp / "gen_%06d.png")],
+                    check=True,
+                )
+                gen_frames = sorted(tdp.glob("gen_*.png"))[:n]
+                if len(gen_frames) < n:
+                    return None
+
+                for i in range(n):
+                    base = PILImage.open(native_frames[i]).convert("RGB")
+                    out = base
+                    mb64 = mask_by_frame.get(span_start + i)
+                    if mb64:
+                        m = PILImage.open(_io.BytesIO(_b64.b64decode(mb64)))
+                        m = (m.getchannel("A") if m.mode == "RGBA"
+                             else m.convert("L"))
+                        # Dilate + feather at the mask's own (small) resolution
+                        # and resize the resulting ALPHA once — visually
+                        # identical to native-res morphology at ~10x less CPU
+                        # (a 49px MaxFilter at 1280x534 per frame dominated
+                        # ingest time).
+                        scale = m.size[0] / base.size[0]
+                        d_small = max(1, round(dilate * scale))
+                        if dilate > 0:
+                            m = m.filter(ImageFilter.MaxFilter(d_small * 2 + 1))
+                        # Feathered alpha blend, not a binary paste: a hard
+                        # fill/native edge re-quantizes per frame and shimmers
+                        # in playback (invisible in stills).
+                        feather = int(job.params.get("composite_feather_px", 8))
+                        if feather > 0:
+                            m = m.filter(ImageFilter.GaussianBlur(
+                                max(1, round(feather * scale))))
+                        m = m.resize(base.size, PILImage.BILINEAR)
+                        alpha = (np.asarray(m, dtype=np.float32) / 255.0)[..., None]
+                        gen = (PILImage.open(gen_frames[i]).convert("RGB")
+                               .resize(base.size, PILImage.LANCZOS))
+                        arr = (np.asarray(gen, dtype=np.float32) * alpha
+                               + np.asarray(base, dtype=np.float32) * (1.0 - alpha)
+                               ).astype("uint8")
+                        out = PILImage.fromarray(arr)
+                    out.save(tdp / f"out_{i:06d}.png")
+
+                subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error",
+                     "-framerate", str(fps),
+                     "-i", str(tdp / "out_%06d.png"),
+                     "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                     "-crf", "16", "-movflags", "+faststart",
+                     str(tdp / "composited.mp4")],
+                    check=True,
+                )
+                return (tdp / "composited.mp4").read_bytes()
+        except Exception:
+            logger.exception(f"[remove ingest {job.modal_call_id}] native "
+                             f"composite failed — storing raw result")
+            return None
+
     def ingest(self, job: OperationJob, result: dict) -> dict:
         import base64 as _b64
 
@@ -522,6 +674,22 @@ class RemoveOp(VideoOp):
         from .layer_renders import store_run_results
 
         mp4_bytes = _b64.b64decode(result["video_mp4_b64"])
+        composited = None
+        # DiffuEraser composites internally (blurred-mask blend over the
+        # original at its working resolution), so when it generated at ~native
+        # size there is nothing for the post-comp to add — skip the whole
+        # (minutes-long) step. VOID/VACE render reduced and need it.
+        native_w = ((job.asset.type_data.get("technical_metadata") or {})
+                    .get("width"))
+        out_w = result.get("width")
+        self_composited = (
+            job.params.get("tier") == "eraser"
+            and out_w and native_w and abs(out_w - native_w) <= 16
+        )
+        if job.params.get("composite_native", True) and not self_composited:
+            composited = self._composite_native(job, result, mp4_bytes)
+            if composited:
+                mp4_bytes = composited
         source_version = (job.asset.versions.order_by("-version_number").first())
         mask_version = Version.objects.filter(
             pk=job.inputs.get("mask_track_version_id")
@@ -536,12 +704,17 @@ class RemoveOp(VideoOp):
             "mask_track_version_id": job.inputs.get("mask_track_version_id"),
             "removal_model": REMOVE_TIERS.get(
                 job.params.get("tier") or "fast", REMOVE_TIERS["fast"])["model"],
+            "passes": result.get("passes"),
+            "windows": result.get("windows"),
             "frames_processed": result.get("frames_processed"),
             "trimmed_frames": result.get("trimmed_frames"),
             "gen_latency_s": result.get("gen_latency_s"),
             "latency_s": result.get("latency_s"),
+            # Raw model output dims; when composited_native, the stored file
+            # is at the source's native resolution instead.
             "output_size": {"width": result.get("width"),
                             "height": result.get("height")},
+            "composited_native": bool(composited),
         }
 
         render_asset, run, versions = store_run_results(
