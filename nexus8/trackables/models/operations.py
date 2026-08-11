@@ -22,12 +22,16 @@ class OperationJob(Trackable):
 
     STATUS_QUEUED = "queued"
     STATUS_WORKING = "working"
+    # Modal finished; one poll request holds the ingest claim and is storing
+    # the result. Other polls report 'working' instead of re-ingesting.
+    STATUS_INGESTING = "ingesting"
     STATUS_DONE = "done"
     STATUS_FAILED = "failed"
     STATUS_CANCELLED = "cancelled"
     STATUS_CHOICES = [
         (STATUS_QUEUED, "Queued"),
         (STATUS_WORKING, "Working"),
+        (STATUS_INGESTING, "Ingesting"),
         (STATUS_DONE, "Done"),
         (STATUS_FAILED, "Failed"),
         (STATUS_CANCELLED, "Cancelled"),

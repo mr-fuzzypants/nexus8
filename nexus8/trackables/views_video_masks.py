@@ -10,7 +10,6 @@ mask-serving views are segment-specific and live here permanently.
 
 import io
 import logging
-import os
 
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -20,7 +19,6 @@ from rest_framework.views import APIView
 
 from .models import MediaAsset, MaskTrack, OperationJob
 from .services import video_ops
-from .services.video_ops import resolve_local_path as _resolve_local_path
 from .services.video_staging import VideoFrameStager, FrameStagingError
 
 logger = logging.getLogger(__name__)
@@ -65,6 +63,8 @@ class VideoMaskPropagateView(APIView):
                     'layer_color': request.data.get('layer_color'),
                     'source_size': request.data.get('source_size'),
                     'staging_tier': request.data.get('staging_tier'),
+                    'chain_source': request.data.get('chain_source'),
+                    'layer_source_layer_id': request.data.get('layer_source_layer_id'),
                 },
                 user=request.user,
             )
@@ -176,23 +176,35 @@ class VideoMaskPreviewView(APIView):
                             status=status.HTTP_400_BAD_REQUEST)
 
         video = get_object_or_404(MediaAsset, id=asset_id)
-        video_path = _resolve_local_path(video.file_path)
-        if not video_path or not os.path.exists(video_path):
-            return Response({'error': 'Video file not found'},
-                            status=status.HTTP_404_NOT_FOUND)
-
         tier = request.data.get('staging_tier') or STAGING_TIER
         if tier not in VideoFrameStager.TIERS:
             tier = STAGING_TIER
 
-        # Stage just this frame (cached per (asset, tier, frame)).
+        # Chaining (Phase 3): previews on a chained layer read the derived
+        # clip's pixels — a preview against the source would segment the very
+        # object the removal already erased. Frame index stays source-based;
+        # the offset applies only at extraction (rebase contract).
+        try:
+            chain_path, chain_offset, chain_count, chain_key = \
+                video_ops.resolve_chain_source(
+                    video, {'chain_source': request.data.get('chain_source')})
+        except video_ops.OpError as exc:
+            return Response({'error': str(exc)}, status=exc.http_status)
+        if chain_count is not None and not (
+            chain_offset <= frame_index <= chain_offset + chain_count - 1
+        ):
+            # Outside the chained clip's covered range — nothing to preview.
+            return Response({'mask_b64': None, 'conditioned': False})
+
+        # Stage just this frame (cached per (clip, tier, frame)).
         try:
             staging_dir = VideoFrameStager.extract_frames(
-                video_path,
+                chain_path,
                 asset_id=str(video.id),
-                version_id=str(video.id),
+                version_id=chain_key,
                 tier=tier,
-                frame_range=(frame_index, frame_index),
+                frame_range=(frame_index - chain_offset,
+                             frame_index - chain_offset),
             )
             frame_path = sorted(staging_dir.glob('frame_*.jpg'))[0]
         except (FrameStagingError, IndexError) as e:
@@ -273,6 +285,123 @@ class VideoMaskPreviewView(APIView):
         })
 
 
+def _normalize_mask_png_b64(b64s: str) -> str:
+    """White-on-black grayscale PNG from either an alpha-carried (RGBA) raster
+    or an already-grayscale mask. Client rasterizers emit alpha-channel masks
+    (the F13 convention); stored track frames are L PNGs (white = object)."""
+    import base64 as _b64
+
+    from PIL import Image as PILImage
+
+    img = PILImage.open(io.BytesIO(_b64.b64decode(b64s)))
+    mask = img.getchannel('A') if img.mode == 'RGBA' else img.convert('L')
+    buf = io.BytesIO()
+    mask.save(buf, format='PNG')
+    return _b64.b64encode(buf.getvalue()).decode()
+
+
+class VideoMaskManualView(APIView):
+    """Bake hand-painted masks into a track version — no GPU job anywhere.
+
+    From-scratch (no base_version_id): painted frames become a 'manual'
+    version with hold-until-next-keyframe fill (garbage-matte semantics —
+    one painted frame on a locked-off shot is a usable removal matte).
+    With base_version_id: painted frames overlay that version's frames as
+    deterministic corrections (the escape hatch when SAM won't converge).
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, asset_id: str, layer_id: str):
+        """POST /api/library/assets/<id>/video-mask/<layer_id>/manual/
+
+        Body: {frames: [{frame_index, mask_png_b64}], fill_policy?,
+               span?: {start, end}, base_version_id?, layer_name?, layer_color?}
+        """
+        from .models import Version
+
+        frames = request.data.get('frames') or []
+        if not frames:
+            return Response({'error': 'frames required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        get_object_or_404(MediaAsset, id=asset_id)
+        track, created = MaskTrack.objects.get_or_create_for_video_and_layer(
+            str(asset_id), layer_id,
+            layer_name=request.data.get('layer_name'),
+            layer_color=request.data.get('layer_color'),
+            source_layer_id=request.data.get('layer_source_layer_id'),
+        )
+
+        base_version = None
+        base_id = request.data.get('base_version_id')
+        if base_id:
+            base_version = Version.objects.filter(pk=base_id, entity=track).first()
+            if not base_version:
+                return Response(
+                    {'error': 'base_version_id does not belong to this track'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        try:
+            normalized = [
+                {'frame_index': f.get('frame_index'),
+                 'mask_png_b64': _normalize_mask_png_b64(f['mask_png_b64'])}
+                for f in frames if f.get('mask_png_b64')
+            ]
+            span = request.data.get('span') or {}
+            version = track.add_manual_version(
+                normalized,
+                fill_policy=request.data.get('fill_policy') or 'hold',
+                span_start=span.get('start'),
+                span_end=span.get('end'),
+                base_version=base_version,
+            )
+        except (ValueError, KeyError, OSError) as exc:
+            return Response({'error': f'Bake failed: {exc}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        logger.info(f"[manual {asset_id[:8]}/{layer_id[:8]}] baked "
+                    f"{len(normalized)} frame(s) as v{version.version_number} "
+                    f"({'correction over ' + base_id[:8] if base_id else 'from scratch'}"
+                    f"{', track created' if created else ''})")
+        return Response({
+            'track_id': str(track.id),
+            'version_id': str(version.id),
+            'version_number': version.version_number,
+            'frames_baked': len(normalized),
+            'versions': track.version_summaries(),
+        }, status=status.HTTP_201_CREATED)
+
+
+class VideoMaskSelectView(APIView):
+    """Pin a take: the version the overlay serves and removal consumes."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, asset_id: str, layer_id: str):
+        """POST /api/library/assets/<id>/video-mask/<layer_id>/select/
+        Body: {version_id}"""
+        from .models import Version
+        from .models.versions import update_symlink
+
+        track = MaskTrack.objects.for_video_and_layer(str(asset_id), layer_id)
+        if not track:
+            return Response({'error': 'No mask track for this layer'},
+                            status=status.HTTP_404_NOT_FOUND)
+        version = Version.objects.filter(
+            pk=request.data.get('version_id'), entity=track
+        ).first()
+        if not version:
+            return Response({'error': 'version_id does not belong to this track'},
+                            status=status.HTTP_404_NOT_FOUND)
+        update_symlink(track, 'selected', version, actor=request.user)
+        return Response({
+            'status': 'selected',
+            'version_id': str(version.id),
+            'version_number': version.version_number,
+        })
+
+
 class VideoMaskTrackInfoView(APIView):
     """Return persisted track state so the timeline can rehydrate after reload.
 
@@ -288,9 +417,8 @@ class VideoMaskTrackInfoView(APIView):
         if not track:
             return Response({'exists': False})
 
-        try:
-            version = track.versions.latest('version_number')
-        except Exception:
+        version = track.current_version()
+        if not version:
             return Response({'exists': False})
 
         frames = version.data.get('frames', [])
@@ -308,6 +436,7 @@ class VideoMaskTrackInfoView(APIView):
             'span_end': frame_indices[-1],
             'keyframes': track.get_keyframes(version_id=str(version.id)),
             'low_confidence_frames': low_conf,
+            'versions': track.version_summaries(),
         })
 
     def delete(self, request, asset_id: str, layer_id: str):
@@ -368,7 +497,7 @@ class VideoMaskListView(APIView):
             track = MaskTrack.objects.filter(pk=rel.entity_id).first()
             if not track:
                 continue
-            version = track.versions.order_by('-version_number').first()
+            version = track.current_version()
             if not version:
                 continue
             frames = version.data.get('frames', [])
@@ -380,11 +509,13 @@ class VideoMaskListView(APIView):
                 'layer_id': layer_id,
                 'layer_name': meta.get('layer_name'),
                 'layer_color': meta.get('layer_color'),
+                'source_layer_id': meta.get('source_layer_id'),
                 'version_id': str(version.id),
                 'span_start': frame_indices[0],
                 'span_end': frame_indices[-1],
                 'keyframes': track.get_keyframes(version_id=str(version.id)),
                 'low_confidence_frames': track.get_low_confidence_frames(version_id=str(version.id)),
+                'versions': track.version_summaries(),
             })
         return Response({'tracks': tracks_out})
 

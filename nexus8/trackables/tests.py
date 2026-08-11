@@ -368,3 +368,136 @@ class ConcurrentVersionNumberTests(TransactionTestCase):
             )
         )
         self.assertEqual(numbers, [1, 2, 3, 4])
+
+
+class ManualMaskTrackTests(TestCase):
+    """Manual (no-GPU) mask-track versions: bake, hold-fill, take pinning."""
+
+    # 1x1 white PNG (grayscale) — a minimal valid mask payload.
+    WHITE_PX = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEA"
+        "G7buVgAAAABJRU5ErkJggg=="
+    )
+
+    def setUp(self):
+        from .models import MaskTrack
+
+        self.video = MediaAsset.objects.create(
+            code="VID", name="Clip", media_type="video"
+        )
+        self.track, _ = MaskTrack.objects.get_or_create_for_video_and_layer(
+            str(self.video.id), "layer-1", layer_name="person"
+        )
+
+    def _bake(self, indices, **kwargs):
+        return self.track.add_manual_version(
+            [{"frame_index": i, "mask_png_b64": self.WHITE_PX} for i in indices],
+            **kwargs,
+        )
+
+    def test_manual_version_records_authorship_and_pins_selected(self):
+        version = self._bake([10, 20], span_start=10, span_end=30)
+        self.assertEqual(version.data["propagation_model"], "manual")
+        self.assertTrue(version.data["manual"])
+        self.assertEqual(
+            [f["authorship"] for f in version.data["frames"]],
+            ["keyframe", "keyframe"],
+        )
+        # Both symlinks point at the bake.
+        self.assertEqual(self.track.current_version().pk, version.pk)
+
+    def test_hold_fill_expands_between_and_after_keyframes(self):
+        self._bake([10, 20], fill_policy="hold", span_start=10, span_end=30)
+        # Between keyframes: frame 15 holds frame 10's mask.
+        self.assertIsNotNone(self.track.get_mask_for_frame(15))
+        # After the last keyframe, inside the span: holds frame 20's mask.
+        self.assertIsNotNone(self.track.get_mask_for_frame(30))
+        # Outside the declared span: empty.
+        self.assertIsNone(self.track.get_mask_for_frame(9))
+        self.assertIsNone(self.track.get_mask_for_frame(31))
+
+    def test_paint_over_correction_merges_base_frames(self):
+        base = self._bake([10, 20], span_start=10, span_end=20)
+        fix = self._bake([20], base_version=base)
+        self.assertTrue(fix.data["manual_correction"])
+        self.assertEqual(fix.data["prior_version_id"], str(base.id))
+        self.assertEqual(fix.data["corrected_frames"], [20])
+        by_index = {f["frame_index"]: f for f in fix.data["frames"]}
+        # Untouched frame kept from the base with its provenance...
+        self.assertEqual(by_index[10]["authorship"], "keyframe")
+        # ...edited frame flipped to correction.
+        self.assertEqual(by_index[20]["authorship"], "correction")
+
+    def test_pinning_an_older_take_redirects_reads(self):
+        v1 = self._bake([10], span_start=10, span_end=10)
+        self._bake([50], span_start=50, span_end=50)
+        # Latest (v2) serves frame 50, not frame 10.
+        self.assertIsNone(self.track.get_mask_for_frame(10))
+        update_symlink(self.track, "selected", v1)
+        # Pinned back to v1: frame 10 serves again.
+        self.assertIsNotNone(self.track.get_mask_for_frame(10))
+        self.assertIsNone(self.track.get_mask_for_frame(50))
+        summaries = self.track.version_summaries()
+        self.assertEqual(
+            [s["selected"] for s in summaries], [False, True]
+        )
+
+
+class ChainSourceResolutionTests(TestCase):
+    """Phase 3 chaining: resolving a removal take as an op's frame source."""
+
+    def setUp(self):
+        import tempfile
+
+        from .models.relations import EntityRelation
+        from .services.video_ops import OpError, resolve_chain_source
+
+        self.OpError = OpError
+        self.resolve = resolve_chain_source
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        self.tmp.write(b"\x00")
+        self.tmp.close()
+
+        self.video = MediaAsset.objects.create(
+            code="VID2", name="Clip", media_type="video",
+            file_path=self.tmp.name,
+        )
+        self.render = MediaAsset.objects.create(code="RND", name="Render")
+        EntityRelation.objects.create(
+            asset=self.video, entity=self.render, role="layer_render",
+            type_data={"layer_id": "layer-A"},
+        )
+        self.take = Version.objects.create(
+            entity=self.render, version_number=3, variation_number=0,
+            data={
+                "file_path": self.tmp.name,
+                "generation": {"op": "remove", "span_start": 600,
+                               "frames_processed": 197},
+            },
+        )
+
+    def tearDown(self):
+        import os as _os
+        _os.unlink(self.tmp.name)
+
+    def test_default_is_asset_file_at_offset_zero(self):
+        path, offset, count, key = self.resolve(self.video, {})
+        self.assertEqual(path, self.tmp.name)
+        self.assertEqual(offset, 0)
+        self.assertIsNone(count)
+        self.assertEqual(key, str(self.video.id))
+
+    def test_chain_resolves_take_with_source_based_offset(self):
+        path, offset, count, key = self.resolve(
+            self.video, {"chain_source": {"layer_id": "layer-A", "run": 3}},
+        )
+        self.assertEqual(path, self.tmp.name)
+        self.assertEqual(offset, 600)
+        self.assertEqual(count, 197)
+        self.assertEqual(key, str(self.take.pk))
+
+    def test_unknown_layer_and_run_are_404(self):
+        with self.assertRaises(self.OpError):
+            self.resolve(self.video, {"chain_source": {"layer_id": "nope", "run": 3}})
+        with self.assertRaises(self.OpError):
+            self.resolve(self.video, {"chain_source": {"layer_id": "layer-A", "run": 99}})

@@ -100,7 +100,9 @@ from .views_video_masks import (
     VideoMaskFrameView,
     VideoMaskTrackInfoView,
     VideoMaskListView,
+    VideoMaskManualView,
     VideoMaskPreviewView,
+    VideoMaskSelectView,
 )
 from .views_video_ops import (
     VideoOpCancelView,
@@ -160,6 +162,8 @@ urlpatterns = [
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/cancel/', VideoMaskCancelView.as_view(), name='library-video-mask-cancel'),
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/mask/', VideoMaskFrameView.as_view(), name='library-video-mask-frame'),
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/preview/', VideoMaskPreviewView.as_view(), name='library-video-mask-preview'),
+    path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/manual/', VideoMaskManualView.as_view(), name='library-video-mask-manual'),
+    path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/select/', VideoMaskSelectView.as_view(), name='library-video-mask-select'),
     path('api/library/assets/<str:asset_id>/video-masks/', VideoMaskListView.as_view(), name='library-video-mask-list'),
     path('api/library/assets/<str:asset_id>/video-mask/<str:layer_id>/', VideoMaskTrackInfoView.as_view(), name='library-video-mask-info'),
     path('api/library/annotations/', AnnotationDocListCreateView.as_view(), name='library-annotations'),
