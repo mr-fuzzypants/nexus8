@@ -129,7 +129,7 @@ interface ViewportProps {
   onMaskStrokeStarted?: () => void
   onMaskStrokeCommitted?: (layerId: string, frameIndex?: number) => void
   maskTrackKeyframes?: Record<string, number[]>
-  maskTrackSegments?: Record<string, Array<{ startFrame: number; endFrame: number; type: 'propagated' | 'lowConfidence' }>>
+  maskTrackSegments?: Record<string, Array<{ startFrame: number; endFrame: number; type: 'propagated' | 'lowConfidence' | 'result' }>>
   assetId?: number
   videoMaskTracks?: Record<string, { version: number }>
   /** Completed generative removals: the result clip overlays the source for
@@ -1123,15 +1123,32 @@ export function AnnotationViewport({
         // its span (Image toggle gates it; hold C to compare). The hidden
         // video element is frame-synced to the transport — seek-follow while
         // paused/scrubbing, play/drift-correct during playback.
+        //
+        // Result clips are FULL frames, so stacking several is winner-take-all
+        // by layer order — ambiguous, and order ties made it session-dependent.
+        // Draw ONLY the ACTIVE layer's result (when its eye is on and the
+        // frame is in the take's span). No fallback to other layers: the eye
+        // must stay local — hiding the selected result shows the ORIGINAL
+        // clip, never some other layer's result.
         const removalShown = new Set<string>()
         if (videoRemovals && !removalCompareHeldRef.current) {
           const media = videoAdapter.getMediaState()
           const fps = Math.max(media.frameRate, 1)
-          for (const layer of maskLayers) {
-            const removal = videoRemovals[layer.id]
-            if (!removal || layer.render_visible === false) continue
-            if (currentFrame < removal.spanStart || currentFrame > removal.spanEnd) continue
-            let v = removalVideoCacheRef.current.get(layer.id)
+          const shownLayer = maskLayers.find((l) => {
+            if (l.id !== activeMaskLayerId) return false
+            const r = videoRemovals[l.id]
+            return Boolean(
+              r && l.render_visible !== false &&
+              currentFrame >= r.spanStart && currentFrame <= r.spanEnd,
+            )
+          })
+          // Pause decks that aren't the one being shown.
+          for (const [id, deck] of removalVideoCacheRef.current) {
+            if (id !== shownLayer?.id && !deck.paused) deck.pause()
+          }
+          if (shownLayer) {
+            const removal = videoRemovals[shownLayer.id]!
+            let v = removalVideoCacheRef.current.get(shownLayer.id)
             if (!v || v.dataset.src !== removal.filePath) {
               v?.pause()
               v = document.createElement('video')
@@ -1142,7 +1159,7 @@ export function AnnotationViewport({
               v.dataset.src = removal.filePath
               v.addEventListener('loadeddata', () => setMaskTick((t) => t + 1))
               v.addEventListener('seeked', () => setMaskTick((t) => t + 1))
-              removalVideoCacheRef.current.set(layer.id, v)
+              removalVideoCacheRef.current.set(shownLayer.id, v)
             }
             const target = (currentFrame - removal.spanStart + 0.5) / fps
             if (media.playing) {
@@ -1158,10 +1175,10 @@ export function AnnotationViewport({
             }
             if (v.readyState >= 2) {
               context.drawImage(v, rect.x, rect.y, rect.w, rect.h)
-              removalShown.add(layer.id)
+              removalShown.add(shownLayer.id)
               context.save()
               context.font = '10px system-ui, sans-serif'
-              const label = 'RESULT · hold C to compare'
+              const label = `RESULT · ${shownLayer.name} · hold C to compare`
               const tw = context.measureText(label).width
               context.fillStyle = 'rgba(2, 6, 23, 0.65)'
               context.fillRect(rect.x + rect.w - tw - 14, rect.y + 6, tw + 10, 16)
@@ -2226,6 +2243,31 @@ export function AnnotationViewport({
           onPointerLeave={handlePointerLeave}
         />
         <canvas ref={genBusyCanvasRef} className="viewer-canvas viewer-canvas--gen-busy" />
+        {videoAdapter && annotatorMode === 'mask' && videoRemovals &&
+          activeMaskLayerId && videoRemovals[activeMaskLayerId] &&
+          maskLayers?.find((l) => l.id === activeMaskLayerId)?.render_visible !== false ? (
+          <button
+            type="button"
+            className="viewer-compare-hold"
+            title="Press and hold to see the original (keyboard: hold C)"
+            onPointerDown={(e) => {
+              e.preventDefault()
+              e.currentTarget.setPointerCapture(e.pointerId)
+              removalCompareHeldRef.current = true
+              setMaskTick((t) => t + 1)
+            }}
+            onPointerUp={() => {
+              removalCompareHeldRef.current = false
+              setMaskTick((t) => t + 1)
+            }}
+            onPointerCancel={() => {
+              removalCompareHeldRef.current = false
+              setMaskTick((t) => t + 1)
+            }}
+          >
+            ⧉ Hold to compare
+          </button>
+        ) : null}
       </div>
       {videoAdapter ? (
         <>

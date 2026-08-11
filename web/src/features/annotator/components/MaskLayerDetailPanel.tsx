@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { AnnotationLayer, GenMode, MaskOp } from '../core/annotations/types'
+import type { AnnotationLayer, GenMode, LayerOp, MaskOp } from '../core/annotations/types'
 
 const MASK_OPS: { value: MaskOp; label: string }[] = [
   { value: 'inpaint', label: 'Inpaint' },
@@ -13,6 +13,34 @@ const MASK_OPS: { value: MaskOp; label: string }[] = [
 
 // Ops with a generation runner behind the Regenerate button.
 const RUNNABLE_OPS: MaskOp[] = ['inpaint', 'scribble', 'sketch_inpaint', 'remove']
+
+/** Per-take provenance for one op: the values its pinned take was made with. */
+export interface TakeParamsInfo {
+  label: string
+  values: Record<string, unknown>
+}
+
+/** Read-only "parameters used" record for an op's pinned take. */
+function TakeParams({ info }: { info?: TakeParamsInfo }) {
+  if (!info) return null
+  const entries = Object.entries(info.values).filter(
+    ([, v]) => v !== null && v !== undefined && v !== '',
+  )
+  if (entries.length === 0) return null
+  return (
+    <details className="mask-layer-detail-panel__take-params">
+      <summary>Parameters used — take {info.label}</summary>
+      <dl>
+        {entries.map(([key, value]) => (
+          <div key={key} className="mask-layer-detail-panel__take-param">
+            <dt>{key}</dt>
+            <dd>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  )
+}
 
 interface Props {
   layer: AnnotationLayer | null
@@ -28,12 +56,17 @@ interface Props {
   /** Bump to force the local slider state to re-sync from the layer (e.g. after
    *  a history recipe is applied — layer switch is the only other sync point). */
   resyncKey?: number
-  /** Video mask layer: hide still-image op machinery; prompt + tier feed the
-   *  Remove action (services/video_ops.py remove op). */
+  /** Video mask layer: hide still-image op machinery; params render per op
+   *  in the layer's serial op stack (layer.ops). */
   isVideo?: boolean
+  /** Merge params into one of the layer's stack ops (video, op-centric). */
+  onUpdateOp?: (opId: string, params: NonNullable<LayerOp['params']>) => void
+  /** Pinned-take provenance per op family: shown as a read-only
+   *  "parameters used" record under the op's editable params. */
+  takeParams?: { mask?: TakeParamsInfo; remove?: TakeParamsInfo }
 }
 
-export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, lastSeed, resyncKey, isVideo }: Props) {
+export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, lastSeed, resyncKey, isVideo, onUpdateOp, takeParams }: Props) {
   // Local slider state avoids the slider snapping back during the Yjs round-trip
   // (onChange → upsertLayer → setSnapshot → re-render). Syncs from props on layer switch.
   const [controlnetScale, setControlnetScale] = useState(layer?.controlnet_scale ?? 0.4)
@@ -80,14 +113,13 @@ export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, last
         </label>
       )}
 
-      {(isVideo || !isRemove) && (
+      {!isVideo && !isRemove && (
         <label className="mask-layer-detail-panel__field">
           <span className="mask-layer-detail-panel__label">Prompt</span>
           <textarea
             className="mask-layer-detail-panel__textarea"
             placeholder={
-              isVideo ? 'For Remove: DESCRIBE the background behind the object (not an instruction)…'
-              : isScribble ? 'Describe what to generate from the sketch…'
+              isScribble ? 'Describe what to generate from the sketch…'
               : isSketchInpaint ? 'Describe what to place in the sketched region…'
               : 'Describe what to generate…'
             }
@@ -98,34 +130,132 @@ export function MaskLayerDetailPanel({ layer, onUpdate, onRegenerate, busy, last
         </label>
       )}
 
-      {isVideo && (
-        <>
-          <label className="mask-layer-detail-panel__field">
-            <span className="mask-layer-detail-panel__label">Negative prompt</span>
-            <textarea
-              className="mask-layer-detail-panel__textarea"
-              placeholder="Fast tier only — e.g. person, figure, silhouette…"
-              value={layer.negative_prompt ?? ''}
-              rows={2}
-              onChange={(e) => onUpdate({ negative_prompt: e.target.value || undefined })}
-            />
-          </label>
-          <label className="mask-layer-detail-panel__field">
-            <span className="mask-layer-detail-panel__label">Removal tier</span>
-            <select
-              className="mask-layer-detail-panel__select"
-              value={layer.gen_mode === 'fast' ? 'fast' : ''}
-              onChange={(e) => onUpdate({ gen_mode: (e.target.value as GenMode) || undefined })}
-            >
-              <option value="">Quality — VOID, true removal (~3–4 min)</option>
-              <option value="fast">Fast — VACE preview (~1–2 min; re-fills implied subjects)</option>
-            </select>
-            <span style={{ fontSize: 11, color: 'rgba(148,163,184,0.5)' }}>
-              Removing a person or anything the scene implies? Use Quality.
-            </span>
-          </label>
-        </>
-      )}
+      {/* Video: per-op parameter sections, one per entry in the layer's
+          serial op stack (appended from the panel's + op menu). */}
+      {isVideo && (layer.ops?.length ? (
+        layer.ops.map((op) => (
+          <div key={op.id} className="mask-layer-detail-panel__op-section">
+            <div className="mask-layer-detail-panel__op-title">
+              {op.type === 'automask' ? 'Automask · SAM 2'
+                : op.type === 'manual_mask' ? 'Manual mask'
+                : 'Remove'}
+            </div>
+
+            {op.type === 'automask' && (
+              <>
+                <label className="mask-layer-detail-panel__field">
+                  <span className="mask-layer-detail-panel__label">Prompt kind</span>
+                  <select
+                    className="mask-layer-detail-panel__select"
+                    value={op.params?.prompt_mode ?? 'points'}
+                    onChange={(e) => onUpdateOp?.(op.id, { prompt_mode: e.target.value as 'points' | 'mask' })}
+                  >
+                    <option value="points">Points — dab to select; SAM infers the extent</option>
+                    <option value="mask">Mask — your painted boundary conditions SAM</option>
+                  </select>
+                </label>
+                <label className="mask-layer-detail-panel__field">
+                  <span className="mask-layer-detail-panel__label">Staging resolution</span>
+                  <select
+                    className="mask-layer-detail-panel__select"
+                    value={op.params?.staging_tier ?? 'preview_480p'}
+                    onChange={(e) => onUpdateOp?.(op.id, { staging_tier: e.target.value as 'preview_480p' | 'preview_720p' | 'native' })}
+                  >
+                    <option value="preview_480p">480p — fast</option>
+                    <option value="preview_720p">720p</option>
+                    <option value="native">Native — best (thin trims, fingers)</option>
+                  </select>
+                  <span style={{ fontSize: 11, color: 'rgba(148,163,184,0.5)' }}>
+                    Higher preserves fine mask detail at more upload/GPU cost
+                  </span>
+                </label>
+              </>
+            )}
+
+            {op.type === 'manual_mask' && (
+              <label className="mask-layer-detail-panel__field">
+                <span className="mask-layer-detail-panel__label">Between keyframes</span>
+                <select
+                  className="mask-layer-detail-panel__select"
+                  value={op.params?.fill_policy ?? 'hold'}
+                  onChange={(e) => onUpdateOp?.(op.id, { fill_policy: e.target.value as 'hold' | 'none' })}
+                >
+                  <option value="hold">Hold — each painted mask persists until the next keyframe</option>
+                  <option value="none">Empty — only painted frames have a mask</option>
+                </select>
+                <span style={{ fontSize: 11, color: 'rgba(148,163,184,0.5)' }}>
+                  Hold = garbage-matte semantics: one painted frame covers a locked-off shot
+                </span>
+              </label>
+            )}
+
+            {op.type === 'remove' && (
+              <>
+                <label className="mask-layer-detail-panel__field">
+                  <span className="mask-layer-detail-panel__label">Tier</span>
+                  <select
+                    className="mask-layer-detail-panel__select"
+                    value={op.params?.tier ?? 'quality'}
+                    onChange={(e) => onUpdateOp?.(op.id, { tier: e.target.value as 'fast' | 'quality' | 'eraser' })}
+                  >
+                    <option value="quality">Quality — VOID, true removal (~3–4 min)</option>
+                    <option value="fast">Fast — VACE preview (~1–2 min; re-fills implied subjects)</option>
+                    <option value="eraser">Eraser — DiffuEraser, promptless flow fill (benchmark only)</option>
+                  </select>
+                  <span style={{ fontSize: 11, color: 'rgba(148,163,184,0.5)' }}>
+                    Removing a person or anything the scene implies? Use Quality.
+                  </span>
+                </label>
+                <label className="mask-layer-detail-panel__field">
+                  <span className="mask-layer-detail-panel__label">Prompt</span>
+                  <textarea
+                    className="mask-layer-detail-panel__textarea"
+                    placeholder="DESCRIBE the background behind the object (not an instruction)…"
+                    value={op.params?.prompt ?? ''}
+                    rows={3}
+                    onChange={(e) => onUpdateOp?.(op.id, { prompt: e.target.value || undefined })}
+                  />
+                </label>
+                <label className="mask-layer-detail-panel__field">
+                  <span className="mask-layer-detail-panel__label">Negative prompt</span>
+                  <textarea
+                    className="mask-layer-detail-panel__textarea"
+                    placeholder="Fast tier only — e.g. person, figure, silhouette…"
+                    value={op.params?.negative_prompt ?? ''}
+                    rows={2}
+                    onChange={(e) => onUpdateOp?.(op.id, { negative_prompt: e.target.value || undefined })}
+                  />
+                </label>
+                <label className="mask-layer-detail-panel__field">
+                  <span className="mask-layer-detail-panel__label">Seed</span>
+                  <input
+                    className="mask-layer-detail-panel__input"
+                    type="number"
+                    min={0}
+                    max={2147483647}
+                    step={1}
+                    placeholder="random"
+                    value={op.params?.seed ?? ''}
+                    onChange={(e) =>
+                      onUpdateOp?.(op.id, { seed: e.target.value === '' ? undefined : parseInt(e.target.value, 10) })
+                    }
+                  />
+                  <span style={{ fontSize: 11, color: 'rgba(148,163,184,0.5)' }}>
+                    Empty = random each run · Set to reproduce a result
+                  </span>
+                </label>
+              </>
+            )}
+
+            <TakeParams info={op.type === 'remove' ? takeParams?.remove : takeParams?.mask} />
+          </div>
+        ))
+      ) : (
+        <p style={{ fontSize: 11, color: 'rgba(148,163,184,0.5)', margin: '4px 0 0' }}>
+          No operations yet — append one from the layer's <strong>+ op</strong> menu
+          (Automask for SAM 2 tracking, Manual mask to paint the matte yourself).
+        </p>
+      ))}
 
       {isSketchInpaint && (
         <>

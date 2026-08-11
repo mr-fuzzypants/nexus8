@@ -5,7 +5,7 @@ import { SpanFrameInput } from './SpanFrameInput'
 interface TrackSegment {
   startFrame: number
   endFrame: number
-  type: 'keyframe' | 'propagated' | 'lowConfidence'
+  type: 'keyframe' | 'propagated' | 'lowConfidence' | 'result'
 }
 
 interface MaskTrackState {
@@ -204,6 +204,20 @@ export function MaskTrackTimeline({
                     <div
                       key={`low-${i}`}
                       className="mask-track-timeline__bar mask-track-timeline__bar--low-confidence"
+                      style={band}
+                    />
+                  ) : null
+                })}
+
+              {/* Result spans: where the layer's pinned removal take lives */}
+              {track.segments
+                .filter((s) => s.type === 'result')
+                .map((seg, i) => {
+                  const band = clipBand(seg.startFrame, seg.endFrame)
+                  return band ? (
+                    <div
+                      key={`res-${i}`}
+                      className="mask-track-timeline__bar mask-track-timeline__bar--result"
                       style={band}
                     />
                   ) : null

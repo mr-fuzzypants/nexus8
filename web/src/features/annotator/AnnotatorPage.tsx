@@ -19,13 +19,16 @@ import type {
 } from './core/annotations/types'
 import { BroadcastCollaborationRoom } from './core/collaboration/broadcast'
 import type { ViewerAdapter } from './core/viewers/adapters'
+import type { VideoViewerAdapter } from './core/viewers/videoAdapter'
 import {
   getAsset,
   getEraseStatus,
   getInpaintStatus,
   getOrCreateAnnotationDoc,
+  getRenderGrid,
   getScribbleStatus,
   getSelectedRenders,
+  selectRender,
   saveDocState,
   saveMask,
   snapshotAnnotationDoc,
@@ -38,7 +41,7 @@ import {
   type AnnotationDoc,
 } from './annotatorApi'
 import { getVersionHistory } from '../../api/versions'
-import { propagateMaskTrack, getMaskTrackStatus, getMaskTrackInfo, listMaskTracks, deleteMaskTrack, maskFrameUrl, previewMask, type PromptFrame } from '../../api/videoMasks'
+import { propagateMaskTrack, getMaskTrackStatus, getMaskTrackInfo, listMaskTracks, deleteMaskTrack, maskFrameUrl, previewMask, bakeManualMask, selectMaskTrackVersion, type PromptFrame, type MaskTrackVersionSummary } from '../../api/videoMasks'
 import { dispatchVideoOp, getVideoOpJob } from '../../api/videoOps'
 import { isMaskShape, rasterizeMask, rasterizeMaskPromptB64, rasterizeCorrectionMaskB64, rasterizeScribble, rasterizeSketchInpaintGuide } from './rasterizeMask'
 import { computeMaskBounds } from './maskBounds'
@@ -46,7 +49,7 @@ import { MaskLayersPanel } from './components/MaskLayersPanel'
 import { MaskLayerDetailPanel } from './components/MaskLayerDetailPanel'
 import { RenderHistoryPanel } from './components/RenderHistoryPanel'
 import { DEFAULT_LAYER_ID } from './core/annotations/types'
-import type { AnnotationLayer } from './core/annotations/types'
+import type { AnnotationLayer, LayerOp, LayerOpType } from './core/annotations/types'
 import './annotator.css'
 
 const PROFILE_COLORS = ['#5eead4', '#f97316', '#60a5fa', '#f472b6', '#a78bfa', '#facc15']
@@ -58,6 +61,31 @@ const LIVE_GEN_TIMEOUT_MS = 90_000
 const MASK_LAYER_COLORS = ['#f97316', '#a78bfa', '#34d399', '#f472b6', '#60a5fa', '#facc15', '#fb923c', '#e879f9']
 const PROFILE_STORAGE_KEY = 'nexus8-annotator-profile'
 const MASK_SIDEBAR_WIDTH_KEY = 'nexus8-annotator-mask-sidebar-width'
+
+/** Default params seeded when an op is appended to a layer's stack. */
+const LAYER_OP_DEFAULTS: Record<LayerOpType, NonNullable<LayerOp['params']>> = {
+  automask: { prompt_mode: 'points', staging_tier: 'preview_480p' },
+  manual_mask: { fill_policy: 'hold' },
+  remove: { tier: 'quality' },
+}
+
+/** The layer's op of a given type, if present in its stack. */
+function layerOpOf(layer: AnnotationLayer | undefined, type: LayerOpType): LayerOp | undefined {
+  return layer?.ops?.find((o) => o.type === type)
+}
+
+/** One removal run of a layer's result track — a durable, selectable take
+ *  (backed by a render-store version; hydrated from the render grid). */
+export interface ResultTake {
+  run: number
+  filePath: string
+  spanStart: number
+  spanEnd: number
+  tier?: string
+  createdAt?: string
+  /** The run's recorded recipe (render version `generation` record). */
+  generation?: Record<string, unknown>
+}
 const MASK_SIDEBAR_MIN = 220
 const MASK_SIDEBAR_MAX = 720
 const MASK_SIDEBAR_DEFAULT = 440
@@ -274,22 +302,46 @@ function AnnotatorWorkspace({
   }
   // Layers with a propagated mask track; `version` bumps per re-propagation to bust the image cache.
   const [videoMaskTracks, setVideoMaskTracks] = useState<Record<string, { version: number }>>({})
-  // Completed generative removals per layer: the result clip (native-res
-  // composite) the viewport overlays during playback when the layer's Image
-  // toggle is on. Session-only; rerunning Remove replaces the entry.
-  const [videoRemovals, setVideoRemovals] = useState<Record<string, {
-    filePath: string
-    spanStart: number
-    spanEnd: number
+  // Takes of each layer's mask track (one per version — manual bakes, SAM2
+  // runs, corrections). The `selected` flag mirrors the server's 'selected'
+  // symlink: the take the overlay serves and removal consumes.
+  const [maskTakes, setMaskTakes] = useState<Record<string, MaskTrackVersionSummary[]>>({})
+  // Derived result tracks per mask layer: every removal run is a durable
+  // "take" (a render-store version, hydrated from the render grid on load and
+  // appended on completion); `selectedRun` is the pinned take driving the
+  // viewport overlay. Replaces the old session-only videoRemovals state.
+  const [resultTracks, setResultTracks] = useState<Record<string, {
+    takes: ResultTake[]
+    selectedRun: number | null
   }>>({})
+  // The viewport overlay's input: the pinned take of each layer's result
+  // track (visibility is still gated by the layer's Image toggle in-viewport).
+  const videoRemovals = useMemo(() => {
+    const out: Record<string, { filePath: string; spanStart: number; spanEnd: number }> = {}
+    for (const [layerId, track] of Object.entries(resultTracks)) {
+      const take = track.takes.find((t) => t.run === track.selectedRun) ?? track.takes[0]
+      if (take) out[layerId] = { filePath: take.filePath, spanStart: take.spanStart, spanEnd: take.spanEnd }
+    }
+    return out
+  }, [resultTracks])
+  // Timeline lanes also show each layer's result span (the pinned take) so
+  // the artist can see WHERE a result lives before scrubbing to it.
+  const timelineSegments = useMemo(() => {
+    const out: Record<string, Array<{ startFrame: number; endFrame: number; type: 'propagated' | 'lowConfidence' | 'result' }>> = { ...maskTrackSegments }
+    for (const [layerId, track] of Object.entries(resultTracks)) {
+      const take = track.takes.find((t) => t.run === track.selectedRun) ?? track.takes[0]
+      if (!take) continue
+      out[layerId] = [...(out[layerId] ?? []), { startFrame: take.spanStart, endFrame: take.spanEnd, type: 'result' as const }]
+    }
+    return out
+  }, [maskTrackSegments, resultTracks])
   const removalAbortRef = useRef<Record<string, AbortController>>({})
   // Guards the one-time mask-track seeding per asset (see rehydration effect below).
   const maskSeededRef = useRef<string | null>(null)
-  // SAM 2 prompt kind: 'points' = clicks (less work, SAM infers extent);
-  // 'mask' = rasterized paint (respects boundary). Default points (old feel).
-  const [maskPromptMode, setMaskPromptMode] = useState<'points' | 'mask'>('points')
-  // Staging resolution: higher preserves fine detail (thin trims) at more cost.
-  const [maskStagingTier, setMaskStagingTier] = useState<'preview_480p' | 'preview_720p' | 'native'>('preview_480p')
+  // Legacy fallbacks for layers without an op stack — the automask op's
+  // prompt_mode / staging_tier params supersede these (op-centric masking).
+  const maskPromptMode: 'points' | 'mask' = 'points'
+  const maskStagingTier: 'preview_480p' | 'preview_720p' | 'native' = 'preview_480p'
   // Display controls for the correction workflow (active layer, video only):
   //  - maskOverlayOpacity: SAM mask tint alpha (0 = hidden).
   //  - promptDisplay: 'result' (clean mask, erase shown as receding) |
@@ -555,7 +607,7 @@ function AnnotatorWorkspace({
           const existing = existingById.get(t.layer_id)
           if (!existing) {
             // The doc lost this layer — restore it so its strokes, timeline
-            // markers and mask overlay reattach.
+            // markers and mask overlay reattach (chain binding included).
             store.upsertLayer({
               id: t.layer_id,
               name: t.layer_name || `Mask ${i + 1}`,
@@ -563,11 +615,16 @@ function AnnotatorWorkspace({
               supportedSpaces: ['image2d'],
               color: t.layer_color || MASK_LAYER_COLORS[i % MASK_LAYER_COLORS.length],
               order: i,
+              ...(t.source_layer_id ? { source: { layerId: t.source_layer_id } } : {}),
             })
-          } else if (!existing.visible) {
+          } else {
+            const patch: Partial<AnnotationLayer> = {}
             // Layer survived but was hidden (selection hides non-active layers);
             // a layer with a persisted track must be visible to show its masks.
-            store.upsertLayer({ ...existing, visible: true })
+            if (!existing.visible) patch.visible = true
+            // Chain binding lost from the doc — restore from the relation.
+            if (!existing.source && t.source_layer_id) patch.source = { layerId: t.source_layer_id }
+            if (Object.keys(patch).length > 0) store.upsertLayer({ ...existing, ...patch })
           }
           setMaskTrackKeyframes((prev) => {
             const merged = new Set([...(prev[t.layer_id] ?? []), ...t.keyframes])
@@ -581,6 +638,9 @@ function AnnotatorWorkspace({
             ...prev,
             [t.layer_id]: { version: prev[t.layer_id]?.version ?? 1 },
           }))
+          if (t.versions) {
+            setMaskTakes((prev) => ({ ...prev, [t.layer_id]: t.versions! }))
+          }
         })
         // Focus a track layer so it stays visible (mask-mode selection hides
         // non-active layers). Keep the current active layer if it already has a
@@ -588,6 +648,90 @@ function AnnotatorWorkspace({
         setActiveMaskLayerId((cur) =>
           cur && tracks.some((t) => t.layer_id === cur) ? cur : tracks[0].layer_id,
         )
+        // Hydrate each track layer's removal results from the render grid:
+        // every run is a durable take, the pinned selection comes from the
+        // render store's `selected` symlink. Restores the result overlay
+        // across reloads (previously session-only).
+        const grids = await Promise.all(
+          tracks.map(async (t) => {
+            try {
+              return [t.layer_id, await getRenderGrid(asset.id, t.layer_id)] as const
+            } catch {
+              return [t.layer_id, null] as const
+            }
+          }),
+        )
+        if (cancelled) return
+        setResultTracks((prev) => {
+          const next = { ...prev }
+          for (const [layerId, grid] of grids) {
+            if (!grid) continue
+            const takes: ResultTake[] = []
+            for (const runRow of grid.runs) {
+              const cell = runRow.results[0]
+              const gen = (cell?.generation ?? {}) as Record<string, unknown>
+              if (gen.op !== 'remove' || !cell?.file_path) continue
+              const spanStart = typeof gen.span_start === 'number' ? gen.span_start : 0
+              const frames = typeof gen.frames_processed === 'number' ? gen.frames_processed : null
+              const spanEnd = frames != null
+                ? spanStart + frames - 1
+                : typeof gen.span_end === 'number' ? gen.span_end : spanStart
+              takes.push({
+                run: runRow.run,
+                filePath: cell.file_path,
+                spanStart,
+                spanEnd,
+                tier: typeof gen.tier === 'string' ? gen.tier : undefined,
+                createdAt: cell.created_at,
+                generation: gen,
+              })
+            }
+            if (!takes.length) continue
+            const pinned = grid.selected?.version_number
+            next[layerId] = {
+              takes,
+              selectedRun: takes.some((t) => t.run === pinned) ? pinned! : takes[0].run,
+            }
+          }
+          return next
+        })
+        // Lineage rebuild (op-centric stacks): every run op left a durable
+        // output (mask-track version / removal render), so a restored layer's
+        // op stack is reconstructed from lineage even when the doc predates
+        // op-centric layers or lost them (F11 identity churn). Only appended-
+        // but-never-run ops depend on the doc alone.
+        for (const t of tracks) {
+          const layer = store.getSnapshot().layers.find((l) => l.id === t.layer_id)
+          if (!layer) continue
+          const ops = [...(layer.ops ?? [])]
+          const hasMaskSource = ops.some((o) => o.type === 'automask' || o.type === 'manual_mask')
+          if (!hasMaskSource && t.versions?.length) {
+            const manualOnly = t.versions.every((v) => v.model === 'manual')
+            const type: LayerOpType = manualOnly ? 'manual_mask' : 'automask'
+            ops.unshift({ id: crypto.randomUUID(), type, params: { ...LAYER_OP_DEFAULTS[type] } })
+          }
+          const grid = grids.find(([id]) => id === t.layer_id)?.[1]
+          const newestGen = grid?.runs[0]?.results[0]?.generation as Record<string, unknown> | undefined
+          const hasRemovalRuns = Boolean(grid?.runs.some((r) => {
+            const cell = r.results[0]
+            return (cell?.generation as Record<string, unknown> | undefined)?.op === 'remove' && cell?.file_path
+          }))
+          if (hasRemovalRuns && !ops.some((o) => o.type === 'remove')) {
+            ops.push({
+              id: crypto.randomUUID(),
+              type: 'remove',
+              // Seed params from the newest run's recipe so re-runs reproduce.
+              params: {
+                tier: (newestGen?.tier as 'fast' | 'quality' | 'eraser' | undefined) ?? 'quality',
+                prompt: typeof newestGen?.prompt === 'string' ? newestGen.prompt : undefined,
+                negative_prompt: typeof newestGen?.negative_prompt === 'string' ? newestGen.negative_prompt : undefined,
+              },
+            })
+          }
+          if (ops.length !== (layer.ops?.length ?? 0)) {
+            store.upsertLayer({ ...layer, ops })
+          }
+        }
       } catch {
         // No tracks for this video, or endpoint unreachable — leave timeline empty.
       }
@@ -940,6 +1084,15 @@ function AnnotatorWorkspace({
    *  immediately. The settled preview becomes the propagation's mask prompt. */
   function schedulePreview(layerId: string) {
     if (!isVideo) return
+    // Op-centric gate: a layer whose stack has no automask op (e.g. manual
+    // masking) must not fire SAM preview GPU calls on every stroke. Layers
+    // with no stack yet keep the legacy preview-on-paint behaviour.
+    const previewLayer = maskLayers.find((l) => l.id === layerId)
+    if (previewLayer?.ops?.length && !layerOpOf(previewLayer, 'automask')) return
+    // Chained layer: preview against the derived clip — previewing the source
+    // would segment the very object the removal erased. No take yet = no preview.
+    const previewChain = previewLayer?.source ? chainSourceFor(previewLayer) : undefined
+    if (previewLayer?.source && !previewChain) return
     const frame = videoFrameRef.current
     if (previewDebounceRef.current != null) window.clearTimeout(previewDebounceRef.current)
     previewDebounceRef.current = window.setTimeout(async () => {
@@ -959,8 +1112,10 @@ function AnnotatorWorkspace({
           frame_index: frame,
           clicks,
           source_size: imageDims ?? undefined,
-          staging_tier: maskStagingTier,
+          staging_tier: layerOpOf(maskLayers.find((l) => l.id === layerId), 'automask')
+            ?.params?.staging_tier ?? maskStagingTier,
           session_span_start: inSession ? sess.spanStart : undefined,
+          chain_source: previewChain,
         })
         if (reqId !== previewReqIdRef.current) return // superseded by a newer click
         if (!result.mask_b64) {
@@ -1048,6 +1203,10 @@ function AnnotatorWorkspace({
     }
 
     const dims = imageDims
+    // Prompt kind from the layer's automask op params (op-centric), falling
+    // back to the legacy global toggle for layers without an op stack.
+    const promptMode = layerOpOf(maskLayers.find((l) => l.id === layerId), 'automask')
+      ?.params?.prompt_mode ?? maskPromptMode
     const frames: PromptFrame[] = []
     for (const [frame_index, { pos, neg }] of Array.from(byFrame.entries()).sort(([a], [b]) => a - b)) {
       // Compile step: if the artist refined this frame through the interactive
@@ -1100,7 +1259,7 @@ function AnnotatorWorkspace({
         }
       }
       // Mask mode (and only then): rasterize the painted object minus negatives.
-      if (maskPromptMode === 'mask' && pos.length && dims) {
+      if (promptMode === 'mask' && pos.length && dims) {
         const mask_b64 = await rasterizeMaskPromptB64(pos, neg, dims.width, dims.height)
         if (mask_b64) {
           frames.push({ frame_index, type: 'mask', mask_b64 })
@@ -1191,6 +1350,13 @@ function AnnotatorWorkspace({
       // auto-scopes.
       const scopedSpan = opts.span ?? layerSpans[layerId] ?? maskSpan
       const propagatedLayer = maskLayers.find((l) => l.id === layerId)
+      // Chained layer: segment the source layer's pinned removal take.
+      const chainSource = propagatedLayer?.source ? chainSourceFor(propagatedLayer) : undefined
+      if (propagatedLayer?.source && !chainSource) {
+        setMaskGenerateState((s) => ({ ...s, [layerId]: 'Run the source removal first' }))
+        window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 3000)
+        return
+      }
       const dispatched = await propagateMaskTrack(asset.id, layerId, {
         prompt_frames: promptFrames,
         propagation_params: scopedSpan
@@ -1199,7 +1365,9 @@ function AnnotatorWorkspace({
         layer_name: propagatedLayer?.name,
         layer_color: propagatedLayer?.color,
         source_size: imageDims ?? undefined,
-        staging_tier: maskStagingTier,
+        staging_tier: layerOpOf(propagatedLayer, 'automask')?.params?.staging_tier ?? maskStagingTier,
+        chain_source: chainSource,
+        layer_source_layer_id: propagatedLayer?.source?.layerId,
       })
       if (abort.signal.aborted) return
 
@@ -1255,6 +1423,10 @@ function AnnotatorWorkspace({
         ...prev,
         [layerId]: { version: (prev[layerId]?.version ?? 0) + 1 },
       }))
+      // Refresh the take list — the run landed as a new pinned version.
+      void getMaskTrackInfo(asset.id, layerId).then((info) => {
+        if (info.versions) setMaskTakes((prev) => ({ ...prev, [layerId]: info.versions! }))
+      }).catch(() => {})
       // Edits are now baked into the track — reset the correction accumulator
       // and drop the interactive previews (the track masks supersede them).
       correctionFramesRef.current[layerId] = new Set()
@@ -1299,16 +1471,27 @@ function AnnotatorWorkspace({
         window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
         return
       }
-      const tier = layer.gen_mode === 'fast' ? 'fast' : 'quality'
+      // Op-centric params (the layer's remove op), falling back to the legacy
+      // layer-level fields for layers without an op stack.
+      const removeOp = layerOpOf(layer, 'remove')
+      const tier = removeOp?.params?.tier
+        ?? (layer.gen_mode === 'fast' ? 'fast' : 'quality')
+      // Chained layer: remove from the source layer's pinned removal take.
+      const chainSource = layer.source ? chainSourceFor(layer) : undefined
+      if (layer.source && !chainSource) {
+        setMaskGenerateState((s) => ({ ...s, [layerId]: 'Run the source removal first' }))
+        window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 3000)
+        return
+      }
       const dispatched = await dispatchVideoOp(asset.id, {
         op: 'remove',
         layer_id: layerId,
-        inputs: { mask_track_version_id: info.version_id },
+        inputs: { mask_track_version_id: info.version_id, chain_source: chainSource },
         params: {
           tier,
-          prompt: layer.prompt ?? '',
-          negative_prompt: layer.negative_prompt,
-          seed: layer.seed,
+          prompt: removeOp?.params?.prompt ?? layer.prompt ?? '',
+          negative_prompt: removeOp?.params?.negative_prompt ?? layer.negative_prompt,
+          seed: removeOp?.params?.seed ?? layer.seed,
         },
       })
       if (abort.signal.aborted) return
@@ -1326,18 +1509,39 @@ function AnnotatorWorkspace({
       }
 
       const spanStart = status.span_start ?? 0
-      setVideoRemovals((prev) => ({
-        ...prev,
-        [layerId]: {
-          filePath: status.file_path!,
-          spanStart,
-          // frames_processed can undercut the dispatched span (VACE trims to
-          // its window multiple) — the overlay must not outrun the clip.
-          spanEnd: status.frames_processed != null
-            ? spanStart + status.frames_processed - 1
-            : status.span_end ?? spanStart,
+      const take: ResultTake = {
+        run: status.run ?? 1,
+        filePath: status.file_path,
+        spanStart,
+        // frames_processed can undercut the dispatched span (VACE trims to
+        // its window multiple) — the overlay must not outrun the clip.
+        spanEnd: status.frames_processed != null
+          ? spanStart + status.frames_processed - 1
+          : status.span_end ?? spanStart,
+        tier,
+        createdAt: new Date().toISOString(),
+        // Client-side recipe until the next reload hydrates the server's
+        // full generation record for this run.
+        generation: {
+          op: 'remove',
+          tier,
+          prompt: removeOp?.params?.prompt ?? layer.prompt ?? '',
+          negative_prompt: removeOp?.params?.negative_prompt ?? layer.negative_prompt,
+          seed: removeOp?.params?.seed ?? layer.seed,
+          span_start: spanStart,
+          frames_processed: status.frames_processed,
+          latency_s: status.latency_s,
+          ...(chainSource ? { chain_source: chainSource } : {}),
         },
-      }))
+      }
+      setResultTracks((prev) => {
+        const existing = prev[layerId]?.takes.filter((t) => t.run !== take.run) ?? []
+        return { ...prev, [layerId]: { takes: [take, ...existing], selectedRun: take.run } }
+      })
+      // Pin the fresh run server-side so a reload restores what the artist is
+      // looking at (deliberate deviation from the still-image "later runs
+      // never move the selection" rule — the artist is watching this land).
+      void selectRender(asset.id, layerId, take.run).catch(() => {})
       // Make the result visible immediately: the Image toggle gates the overlay.
       if (layer.render_visible === false) {
         room.store.upsertLayer({ ...layer, render_visible: true })
@@ -1352,6 +1556,220 @@ function AnnotatorWorkspace({
       setMaskGenerateState((s) => ({ ...s, [layerId]: message }))
       window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 6000)
     }
+  }
+
+  /** Append an operation to the layer's serial op stack (the + op menu).
+   *  The stack is typed: one mask-source op, generative ops after — the menu
+   *  in the panel only offers valid types for the current stack tail. */
+  function appendLayerOp(layerId: string, type: LayerOpType) {
+    const layer = room.store.getSnapshot().layers.find((l) => l.id === layerId)
+    if (!layer || layer.ops?.some((o) => o.type === type)) return
+    const op: LayerOp = { id: crypto.randomUUID(), type, params: { ...LAYER_OP_DEFAULTS[type] } }
+    room.store.upsertLayer({ ...layer, ops: [...(layer.ops ?? []), op] })
+  }
+
+  /** Merge params into one of the layer's stack ops (parameters window). */
+  function updateLayerOp(layerId: string, opId: string, params: NonNullable<LayerOp['params']>) {
+    const layer = room.store.getSnapshot().layers.find((l) => l.id === layerId)
+    if (!layer?.ops) return
+    room.store.upsertLayer({
+      ...layer,
+      ops: layer.ops.map((o) => (o.id === opId ? { ...o, params: { ...o.params, ...params } } : o)),
+    })
+  }
+
+  /** Remove a never-run op from the stack. Ops with durable takes are kept —
+   *  lineage rebuild would just resurrect their row on the next reload. */
+  function removeLayerOp(layerId: string, opId: string) {
+    const layer = room.store.getSnapshot().layers.find((l) => l.id === layerId)
+    if (!layer?.ops) return
+    room.store.upsertLayer({ ...layer, ops: layer.ops.filter((o) => o.id !== opId) })
+  }
+
+  /** The dispatch-time chain binding for a chained layer: its source layer's
+   *  pinned removal take. Undefined for normal layers, and for chained layers
+   *  whose source has no removal take yet (callers guard with a message). */
+  function chainSourceFor(layer: AnnotationLayer | undefined): { layer_id: string; run: number } | undefined {
+    const srcLayerId = layer?.source?.layerId
+    if (!srcLayerId) return undefined
+    const track = resultTracks[srcLayerId]
+    const take = track?.takes.find((t) => t.run === track.selectedRun) ?? track?.takes[0]
+    return take ? { layer_id: srcLayerId, run: take.run } : undefined
+  }
+
+  /** Create a chained layer (Phase 3): a nested layer whose whole op stack
+   *  operates on the given layer's pinned removal take — mask the removed
+   *  clip, remove again, and so on. Frame indices stay source-based. With
+   *  `opType` (the full-stack appender's "· on result" entries), the chosen
+   *  op is appended to the new layer in the same gesture. */
+  function createChainedLayer(sourceLayerId: string, opType?: LayerOpType) {
+    const src = maskLayers.find((l) => l.id === sourceLayerId)
+    if (!src) return
+    const nextOrder = maskLayers.length > 0
+      ? Math.max(...maskLayers.map((l) => l.order ?? 0)) + 1
+      : 0
+    const layer: AnnotationLayer = {
+      ...createMaskLayer(`${src.name} › result`, nextOrder, maskLayers.length),
+      source: { layerId: sourceLayerId },
+      ...(opType
+        ? { ops: [{ id: crypto.randomUUID(), type: opType, params: { ...LAYER_OP_DEFAULTS[opType] } }] }
+        : {}),
+    }
+    handleSelectMaskLayer(layer.id)
+    room.store.upsertLayer(layer)
+  }
+
+  /** Switch a result track's pinned take: the overlay follows immediately and
+   *  the choice pins server-side via the render store's `selected` symlink. */
+  function selectResultTake(layerId: string, run: number) {
+    setResultTracks((prev) => {
+      const track = prev[layerId]
+      if (!track || track.selectedRun === run) return prev
+      return { ...prev, [layerId]: { ...track, selectedRun: run } }
+    })
+    void selectRender(asset.id, layerId, run).catch(() => {})
+  }
+
+  /** Bake the layer's painted masks into a track version — no GPU anywhere.
+   *  With an existing track and pending edits, the paint overlays the pinned
+   *  take as deterministic corrections (the escape hatch when SAM won't
+   *  converge); otherwise every painted frame becomes a from-scratch manual
+   *  track with hold-until-next-keyframe fill (garbage-matte semantics). */
+  async function bakeMaskTrack(layerId: string) {
+    const layer = maskLayers.find((l) => l.id === layerId)
+    const dims = imageDims
+    if (!layer || !dims) return
+    setMaskGenerateState((s) => ({ ...s, [layerId]: 'baking…' }))
+    try {
+      const snap = room.store.getSnapshot()
+      const byFrame = new Map<number, { pos: AnnotationEntity[]; neg: AnnotationEntity[] }>()
+      for (const ann of snap.annotations) {
+        if (!ann.maskRegion || ann.layerId !== layerId) continue
+        const frameIndex = ann.frame.mediaBinding?.frame
+        if (typeof frameIndex !== 'number') continue
+        const geom = ann.geometry
+        if (geom.kind !== 'brush' && geom.kind !== 'freehand' && geom.kind !== 'polygon') continue
+        if (geom.points.length === 0) continue
+        const bucket = byFrame.get(frameIndex) ?? { pos: [], neg: [] }
+        if (geom.kind === 'brush' && geom.negative) bucket.neg.push(ann)
+        else bucket.pos.push(ann)
+        byFrame.set(frameIndex, bucket)
+      }
+
+      const takes = maskTakes[layerId] ?? []
+      const pinned = takes.find((t) => t.selected) ?? takes[0]
+      const edited = correctionFramesRef.current[layerId]
+      const isCorrection = Boolean(pinned && edited && edited.size > 0)
+
+      const frames: { frame_index: number; mask_png_b64: string }[] = []
+      if (isCorrection) {
+        // Paint-over correction: composite prior mask + paint on each edited
+        // frame (the F14 compositing path), keep every other frame untouched.
+        for (const frame of Array.from(edited!).sort((a, b) => a - b)) {
+          const approved = previewMasks[layerId]?.[frame]
+          let mask_b64: string | null = approved ? approved.dataUrl.split(',')[1] : null
+          if (!mask_b64) {
+            const prior = await loadImageElement(
+              maskFrameUrl(asset.id, layerId, frame, videoMaskTracks[layerId]?.version ?? 0),
+            )
+            const bucket = byFrame.get(frame)
+            mask_b64 = await rasterizeCorrectionMaskB64(
+              prior, bucket?.pos ?? [], bucket?.neg ?? [], dims.width, dims.height,
+            )
+          }
+          if (mask_b64) frames.push({ frame_index: frame, mask_png_b64: mask_b64 })
+        }
+      } else {
+        // From-scratch bake: every painted frame verbatim (settled preview
+        // wins over raw paint when the artist refined through the SAM loop).
+        for (const [frame, bucket] of Array.from(byFrame.entries()).sort(([a], [b]) => a - b)) {
+          const approved = previewMasks[layerId]?.[frame]
+          const mask_b64 = approved
+            ? approved.dataUrl.split(',')[1]
+            : bucket.pos.length
+              ? await rasterizeMaskPromptB64(bucket.pos, bucket.neg, dims.width, dims.height)
+              : null
+          if (mask_b64) frames.push({ frame_index: frame, mask_png_b64: mask_b64 })
+        }
+      }
+      if (frames.length === 0) {
+        setMaskGenerateState((s) => ({ ...s, [layerId]: 'Paint a mask first' }))
+        window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 2500)
+        return
+      }
+
+      const span = layerSpans[layerId] ?? maskSpan
+      const res = await bakeManualMask(asset.id, layerId, {
+        frames,
+        fill_policy: layerOpOf(layer, 'manual_mask')?.params?.fill_policy ?? 'hold',
+        span: span ?? undefined,
+        base_version_id: isCorrection ? pinned!.version_id : undefined,
+        layer_name: layer.name,
+        layer_color: layer.color,
+        layer_source_layer_id: layer.source?.layerId,
+      })
+
+      setMaskTakes((prev) => ({ ...prev, [layerId]: res.versions }))
+      const sel = res.versions.find((v) => v.selected) ?? res.versions[0]
+      if (sel) {
+        setMaskTrackSegments((prev) => ({
+          ...prev,
+          [layerId]: [{ startFrame: sel.span_start, endFrame: sel.span_end, type: 'propagated' as const }],
+        }))
+      }
+      setMaskTrackKeyframes((prev) => {
+        const merged = new Set([...(prev[layerId] ?? []), ...frames.map((f) => f.frame_index)])
+        return { ...prev, [layerId]: Array.from(merged).sort((a, b) => a - b) }
+      })
+      setVideoMaskTracks((prev) => ({
+        ...prev,
+        [layerId]: { version: (prev[layerId]?.version ?? 0) + 1 },
+      }))
+      if (isCorrection) correctionFramesRef.current[layerId] = new Set()
+      setPreviewMasks((prev) => ({ ...prev, [layerId]: {} }))
+      setMaskGenerateState((s) => ({ ...s, [layerId]: `Baked ${frames.length}f · v${res.version_number}` }))
+      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 3000)
+    } catch (error) {
+      const apiError = (error as { response?: { data?: { error?: string } } })?.response?.data?.error
+      const message = apiError ?? (error instanceof Error ? error.message : 'Bake failed')
+      setMaskGenerateState((s) => ({ ...s, [layerId]: message }))
+      window.setTimeout(() => setMaskGenerateState((s) => ({ ...s, [layerId]: 'idle' })), 6000)
+    }
+  }
+
+  /** Pin a mask take: the overlay and downstream removal follow immediately;
+   *  the server's 'selected' symlink makes it durable across reloads. */
+  function selectMaskTake(layerId: string, versionId: string) {
+    const take = maskTakes[layerId]?.find((t) => t.version_id === versionId)
+    if (!take || take.selected) return
+    setMaskTakes((prev) => ({
+      ...prev,
+      [layerId]: (prev[layerId] ?? []).map((t) => ({ ...t, selected: t.version_id === versionId })),
+    }))
+    setMaskTrackSegments((prev) => ({
+      ...prev,
+      [layerId]: [{ startFrame: take.span_start, endFrame: take.span_end, type: 'propagated' as const }],
+    }))
+    // The serve default follows the pinned version — bust the per-frame cache.
+    setVideoMaskTracks((prev) => ({
+      ...prev,
+      [layerId]: { version: (prev[layerId]?.version ?? 0) + 1 },
+    }))
+    void selectMaskTrackVersion(asset.id, layerId, versionId).catch(() => {})
+  }
+
+  /** Focus a layer's result track: select the layer and jump the playhead to
+   *  the pinned take's span start, so the result is immediately on screen
+   *  instead of requiring a blind scrub to its frame range. */
+  function focusResultTrack(layerId: string) {
+    handleSelectMaskLayer(layerId)
+    const track = resultTracks[layerId]
+    const take = track?.takes.find((t) => t.run === track.selectedRun) ?? track?.takes[0]
+    if (!take || !adapter || !('getMediaState' in adapter)) return
+    const video = adapter as VideoViewerAdapter
+    const media = video.getMediaState()
+    const total = media.duration ? Math.round(media.duration * media.frameRate) : 0
+    if (total > 0) video.previewSeekToProgress((take.spanStart + 0.5) / total)
   }
 
   /** Dispatch the layer's mask_op to its generation runner. No-op when the op
@@ -1961,7 +2379,7 @@ function AnnotatorWorkspace({
           onMaskStrokeStarted={invalidateLiveGeneration}
           onMaskStrokeCommitted={handleMaskStrokeCommitted}
           maskTrackKeyframes={mergedMaskKeyframes}
-          maskTrackSegments={maskTrackSegments}
+          maskTrackSegments={timelineSegments}
           assetId={asset.id}
           videoMaskTracks={videoMaskTracks}
           videoRemovals={videoRemovals}
@@ -1999,11 +2417,16 @@ function AnnotatorWorkspace({
               onPropagateMask={handlePropagateMaskTrack}
               onCorrectMask={handleCorrectMaskTrack}
               onRemoveObject={isVideo ? runRemoval : undefined}
+              onBakeMask={isVideo ? (id) => void bakeMaskTrack(id) : undefined}
+              maskTakes={isVideo ? maskTakes : undefined}
+              onSelectMaskTake={isVideo ? selectMaskTake : undefined}
+              resultTracks={isVideo ? resultTracks : undefined}
+              onSelectResultTake={isVideo ? selectResultTake : undefined}
+              onFocusResult={isVideo ? focusResultTrack : undefined}
               trackedLayerIds={Object.fromEntries(Object.keys(videoMaskTracks).map((id) => [id, true]))}
-              promptMode={maskPromptMode}
-              onPromptModeChange={setMaskPromptMode}
-              stagingTier={maskStagingTier}
-              onStagingTierChange={setMaskStagingTier}
+              onAppendOp={isVideo ? appendLayerOp : undefined}
+              onRemoveOp={isVideo ? removeLayerOp : undefined}
+              onChainFromResult={isVideo ? createChainedLayer : undefined}
               maskOverlayOpacity={maskOverlayOpacity}
               onMaskOverlayOpacityChange={setMaskOverlayOpacity}
               promptDisplay={promptDisplay}
@@ -2043,6 +2466,27 @@ function AnnotatorWorkspace({
                 layer={maskLayers.find((l) => l.id === activeMaskLayerId) ?? null}
                 isVideo={isVideo}
                 onUpdate={(fields) => handleUpdateMaskLayer(activeMaskLayerId, fields)}
+                onUpdateOp={(opId, params) => updateLayerOp(activeMaskLayerId, opId, params)}
+                takeParams={isVideo ? (() => {
+                  const mts = maskTakes[activeMaskLayerId]
+                  const mt = mts?.find((t) => t.selected) ?? mts?.[0]
+                  const rt = resultTracks[activeMaskLayerId]
+                  const rtk = rt?.takes.find((t) => t.run === rt.selectedRun) ?? rt?.takes[0]
+                  return {
+                    mask: mt
+                      ? {
+                          label: `v${mt.version_number}`,
+                          values: mt.params ?? { model: mt.model, span: [mt.span_start, mt.span_end] },
+                        }
+                      : undefined,
+                    remove: rtk
+                      ? {
+                          label: `v${rtk.run}`,
+                          values: rtk.generation ?? { tier: rtk.tier, span: [rtk.spanStart, rtk.spanEnd] },
+                        }
+                      : undefined,
+                  }
+                })() : undefined}
                 onRegenerate={() => handleRegenerateLayer(activeMaskLayerId)}
                 busy={liveGenStatus.phase === 'saving' || liveGenStatus.phase === 'generating'}
                 lastSeed={liveGenStatus.seedUsed}

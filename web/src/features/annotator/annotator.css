@@ -329,6 +329,149 @@
   opacity: 1;
 }
 
+/* Chained-layer badge: this layer's ops read another layer's removal result. */
+.mask-layers-panel__chain-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(94, 234, 212, 0.12);
+  color: rgba(94, 234, 212, 0.85);
+  white-space: nowrap;
+}
+
+/* Op appender in the layer header: always-visible op dropdown + explicit +
+   button that appends the chosen operation as a sub-layer with parameters. */
+.mask-layers-panel__add-op {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.mask-layers-panel__add-op-select {
+  max-width: 118px;
+  font-size: 11px;
+  padding: 1px 4px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 5px;
+  background: var(--color-bg, #0f172a);
+  color: rgba(226, 232, 240, 0.9);
+  cursor: pointer;
+}
+
+.mask-layers-panel__add-op-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: 1px solid rgba(94, 234, 212, 0.35);
+  border-radius: 5px;
+  background: rgba(13, 148, 136, 0.15);
+  color: #5eead4;
+  cursor: pointer;
+}
+
+.mask-layers-panel__add-op-btn:hover {
+  background: rgba(13, 148, 136, 0.35);
+}
+
+/* Derived result row: nested under the mask layer that produced it. */
+.mask-layers-panel__result {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 4px 26px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background 0.1s ease;
+}
+
+.mask-layers-panel__result:hover {
+  background: rgba(148, 163, 184, 0.07);
+}
+
+.mask-layers-panel__result.is-active {
+  background: rgba(94, 234, 212, 0.05);
+  border-left-color: rgba(94, 234, 212, 0.35);
+}
+
+.mask-layers-panel__result:hover .mask-layers-panel__actions,
+.mask-layers-panel__result.is-active .mask-layers-panel__actions {
+  opacity: 1;
+}
+
+.mask-layers-panel__result-connector {
+  flex-shrink: 0;
+  color: rgba(148, 163, 184, 0.55);
+}
+
+.mask-layers-panel__result-swatch {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  border: 1.5px solid;
+  background: transparent;
+}
+
+/* Mask-track row swatch: filled (a selection artifact), vs the outline
+   swatch of generative results. */
+.mask-layers-panel__result-swatch--mask {
+  opacity: 0.85;
+}
+
+.mask-layers-panel__result-name {
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.85);
+  white-space: nowrap;
+}
+
+.mask-layers-panel__result.is-hidden .mask-layers-panel__result-name {
+  opacity: 0.45;
+}
+
+/* Press-and-hold A/B button over the viewport: while held, the removal
+   overlay hides and the original shows (same mechanism as holding C). */
+.viewer-compare-hold {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 6;
+  padding: 5px 12px;
+  font-size: 12px;
+  border: 1px solid rgba(94, 234, 212, 0.4);
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.75);
+  color: #5eead4;
+  cursor: pointer;
+  user-select: none;
+  touch-action: none;
+}
+
+.viewer-compare-hold:hover {
+  background: rgba(13, 148, 136, 0.25);
+}
+
+.viewer-compare-hold:active {
+  background: rgba(13, 148, 136, 0.45);
+  color: #ccfbf1;
+}
+
+.mask-layers-panel__result-take {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  padding: 1px 4px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 5px;
+  background: var(--color-bg, #0f172a);
+  color: rgba(226, 232, 240, 0.9);
+  cursor: pointer;
+}
+
 .mask-layers-panel__action {
   display: inline-flex;
   align-items: center;
@@ -1246,6 +1389,70 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* Per-op parameter section (video op-centric stacks). */
+.mask-layer-detail-panel__op-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.mask-layer-detail-panel__op-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #5eead4;
+}
+
+/* Read-only "parameters used" record for an op's pinned take. */
+.mask-layer-detail-panel__take-params {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.75);
+}
+
+.mask-layer-detail-panel__take-params summary {
+  cursor: pointer;
+  user-select: none;
+  color: rgba(148, 163, 184, 0.65);
+}
+
+.mask-layer-detail-panel__take-params summary:hover {
+  color: rgba(226, 232, 240, 0.85);
+}
+
+.mask-layer-detail-panel__take-params dl {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-left: 2px solid rgba(94, 234, 212, 0.25);
+  background: rgba(2, 6, 23, 0.4);
+  border-radius: 0 6px 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mask-layer-detail-panel__take-param {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.mask-layer-detail-panel__take-param dt {
+  flex-shrink: 0;
+  min-width: 96px;
+  color: rgba(148, 163, 184, 0.55);
+}
+
+.mask-layer-detail-panel__take-param dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  font-size: 10.5px;
+  color: rgba(226, 232, 240, 0.85);
+  overflow-wrap: anywhere;
 }
 
 .mask-layer-detail-panel__title {

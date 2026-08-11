@@ -132,6 +132,36 @@ export interface AnnotationEntity {
 }
 
 export type MaskOp = 'inpaint' | 'outpaint' | 'background_replace' | 'remove' | 'segment' | 'scribble' | 'sketch_inpaint'
+
+/** Video layer op-stack entry types. The stack is linear and typed: one
+ *  mask-source op (automask | manual_mask) first, generative ops after. */
+export type LayerOpType = 'automask' | 'manual_mask' | 'remove'
+
+/** One operation in a video mask layer's serial op stack. Appended by the
+ *  artist from the panel's op menu; params are op-scoped and edited in the
+ *  parameters window. Run ops materialize durable takes (mask-track versions
+ *  or removal renders), from which the stack is reconstructed on reload. */
+export interface LayerOp {
+  id: string
+  type: LayerOpType
+  params?: {
+    /** automask: SAM 2 prompt kind — points (SAM infers extent) or mask (paint boundary). */
+    prompt_mode?: 'points' | 'mask'
+    /** automask: staging resolution tier (detail vs upload/GPU cost). */
+    staging_tier?: 'preview_480p' | 'preview_720p' | 'native'
+    /** manual_mask: in-between-frame policy — hold each painted mask until the
+     *  next keyframe (garbage-matte semantics) or leave unpainted frames empty. */
+    fill_policy?: 'hold' | 'none'
+    /** remove: removal tier — quality (VOID), fast (VACE preview), eraser (DiffuEraser, benchmark-only). */
+    tier?: 'fast' | 'quality' | 'eraser'
+    /** remove: DESCRIBE the occluded background (not an instruction). */
+    prompt?: string
+    /** remove (fast tier): CFG negative prompt. */
+    negative_prompt?: string
+    /** remove: fixed RNG seed for reproducibility. */
+    seed?: number
+  }
+}
 /** Generation quality tradeoff: fast = LCM (~2s, harmonize/remove only — barely
  *  follows prompts); quality = full CFG (~4-5s, needed for prompted content). */
 export type GenMode = 'fast' | 'quality'
@@ -179,6 +209,13 @@ export interface AnnotationLayer {
    *  Only meaningful when `reference` resolves to an image; higher values can
    *  override the text prompt. */
   reference_scale?: number
+  /** Video: the layer's serial operation stack (op-centric masking). */
+  ops?: LayerOp[]
+  /** Video chaining (Phase 3): when set, this layer's entire stack operates
+   *  on the SOURCE layer's pinned removal take (a derived clip) instead of
+   *  the library asset. Frame indices/coords stay source-based everywhere;
+   *  the backend rebases once at frame extraction. */
+  source?: { layerId: string }
 }
 
 export interface AnnotationDocumentSnapshot {

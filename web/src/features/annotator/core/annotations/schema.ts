@@ -348,6 +348,18 @@ function stableLayerRecord(layer: AnnotationLayer) {
     ...(layer.denoise_strength !== undefined ? { denoise_strength: layer.denoise_strength } : {}),
     ...(layer.reference_scale !== undefined ? { reference_scale: layer.reference_scale } : {}),
     ...(layer.render_visible !== undefined ? { render_visible: layer.render_visible } : {}),
+    // Video op stack (op-centric masking). Every snapshot read passes through
+    // this whitelist — omitting a field here silently deletes it (F14a).
+    ...(layer.ops !== undefined
+      ? {
+          ops: layer.ops.map((op) => ({
+            id: op.id,
+            type: op.type,
+            ...(op.params !== undefined ? { params: { ...op.params } } : {}),
+          })),
+        }
+      : {}),
+    ...(layer.source !== undefined ? { source: { layerId: layer.source.layerId } } : {}),
   }
 }
 
