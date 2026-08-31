@@ -9,6 +9,7 @@ import {
   frameToMidTime,
   timeToFrame,
   type VideoMediaState,
+  type VideoSpriteManifest,
   type VideoViewerAdapter,
 } from '../core/viewers/videoAdapter'
 
@@ -24,6 +25,8 @@ const WIDTH_QUANTUM = 64
 const SEEK_TIMEOUT_MS = 4000
 const MIN_THUMB_WIDTH = 28
 const MAX_THUMB_WIDTH = 120
+// Cap the extracted-frame bitmap cache so deep scrubbing can't leak GPU memory.
+const MAX_FRAME_CACHE = 600
 // Trail span edits (handle drags, rapid typing) before re-extracting thumbnails.
 const WINDOW_DEBOUNCE_MS = 250
 
@@ -31,6 +34,111 @@ type DragMode = 'scrub' | 'start' | 'end'
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
+}
+
+interface SourceRect {
+  sx: number
+  sy: number
+  sw: number
+  sh: number
+}
+
+// The tile in a sprite sheet covering `localTime` seconds into the clip.
+function spriteTileRect(sprite: VideoSpriteManifest, localTime: number): SourceRect {
+  const index = clamp(Math.floor(localTime / sprite.interval), 0, sprite.count - 1)
+  const col = index % sprite.columns
+  const row = Math.floor(index / sprite.columns)
+  return {
+    sx: col * sprite.tile_width,
+    sy: row * sprite.tile_height,
+    sw: sprite.tile_width,
+    sh: sprite.tile_height,
+  }
+}
+
+// Cover-fit a source region into a destination slot without distortion.
+function drawCover(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  region: SourceRect,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+) {
+  if (region.sw <= 0 || region.sh <= 0) {
+    return
+  }
+  const scale = Math.max(dw / region.sw, dh / region.sh)
+  const cropW = dw / scale
+  const cropH = dh / scale
+  ctx.drawImage(
+    source,
+    region.sx + (region.sw - cropW) / 2,
+    region.sy + (region.sh - cropH) / 2,
+    cropW,
+    cropH,
+    dx,
+    dy,
+    dw,
+    dh,
+  )
+}
+
+// Decode an image URL (e.g. a sprite sheet) to a GPU-friendly bitmap.
+async function loadImageBitmap(url: string): Promise<ImageBitmap> {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`sprite fetch failed: ${response.status}`)
+  }
+  return createImageBitmap(await response.blob())
+}
+
+// Insert a frame bitmap, evicting the oldest (and freeing its GPU memory) once
+// the cache is full. Map iteration order is insertion order, so the first key
+// is the oldest.
+function rememberFrame(cache: Map<string, ImageBitmap>, key: string, bitmap: ImageBitmap) {
+  cache.set(key, bitmap)
+  while (cache.size > MAX_FRAME_CACHE) {
+    const oldest = cache.keys().next().value
+    if (oldest === undefined) {
+      break
+    }
+    cache.get(oldest)?.close()
+    cache.delete(oldest)
+  }
+}
+
+// Wait until a seek is actually presented before capturing. `seeked` alone can
+// hand back the previous frame on some decoders, so prefer requestVideoFrameCallback.
+function waitForPresentedFrame(video: HTMLVideoElement): Promise<boolean> {
+  const hasRvfc = 'requestVideoFrameCallback' in video
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const settle = (ok: boolean) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      clearTimeout(timer)
+      video.removeEventListener('seeked', onSeeked)
+      video.removeEventListener('error', onError)
+      resolve(ok)
+    }
+    const onSeeked = () => {
+      if (hasRvfc) {
+        ;(video as HTMLVideoElement & {
+          requestVideoFrameCallback: (cb: () => void) => number
+        }).requestVideoFrameCallback(() => settle(true))
+      } else {
+        settle(true)
+      }
+    }
+    const onError = () => settle(false)
+    const timer = setTimeout(() => settle(false), SEEK_TIMEOUT_MS)
+    video.addEventListener('seeked', onSeeked, { once: true })
+    video.addEventListener('error', onError, { once: true })
+  })
 }
 
 // Resolves false on error or timeout instead of rejecting, so one bad clip
@@ -87,7 +195,24 @@ export function FilmstripScrubber({
   // mode the span is the window — remapping mid-drag would shift the timeline
   // under the pointer.
   const dragWindowRef = useRef<FrameSpan | null>(null)
+  // Decoded sprite sheets keyed by URL, and extracted video frames keyed by
+  // `${src}#${frameIndex}`. Both persist across effect re-runs so zoom/resize
+  // changes redraw from cache instead of re-decoding or re-seeking.
+  const spriteCacheRef = useRef<Map<string, ImageBitmap>>(new Map())
+  const frameCacheRef = useRef<Map<string, ImageBitmap>>(new Map())
   const [stripWidth, setStripWidth] = useState(0)
+
+  // Free every decoded bitmap when the strip unmounts.
+  useEffect(() => {
+    const sprites = spriteCacheRef.current
+    const frames = frameCacheRef.current
+    return () => {
+      sprites.forEach((bitmap) => bitmap.close())
+      sprites.clear()
+      frames.forEach((bitmap) => bitmap.close())
+      frames.clear()
+    }
+  }, [])
 
   useEffect(() => {
     const element = containerRef.current
@@ -186,71 +311,137 @@ export function FilmstripScrubber({
       const slotCount = Math.max(1, Math.min(Math.round(bucketWidth / idealThumbWidth), rangeFrameCount))
       const slotWidth = (bucketWidth / slotCount) * dpr
       const slotHeight = STRIP_HEIGHT * dpr
+      const slotX = (slot: number) => slot * slotWidth
 
-      const failedSources = new Set<string>()
-      // video.src reflects the resolved absolute URL, so it can't be compared
-      // against clip.src (possibly relative) to detect source changes.
-      let loadedSrc: string | null = null
-
-      for (let slot = 0; slot < slotCount; slot += 1) {
-        if (cancelled) {
-          return
-        }
+      // Map each slot to the clip + local time it samples.
+      const slots = Array.from({ length: slotCount }, (_, slot) => {
         const globalTime = clamp(
           rangeStartTime + ((slot + 0.5) / slotCount) * rangeDuration,
           0,
           stateDuration,
         )
         const clip = clips.find((candidate) => globalTime < candidate.endTime) ?? clips[clips.length - 1]
-        if (failedSources.has(clip.src)) {
+        // Keep a safety margin from the clip end: seeking at/past duration can
+        // hang some decoders instead of firing `seeked`.
+        const localTime = clamp(globalTime - clip.startTime, 0, Math.max(clip.duration - 0.05, 0))
+        return { slot, clip, globalTime, localTime }
+      })
+
+      // Pass 1 — sprite tiles paint instantly (one decoded image, no seeking).
+      // Slots whose clip has no sprite fall through to client-side extraction.
+      const spritesToLoad = new Set<string>()
+      const videoSlots: typeof slots = []
+      const paintSprite = (item: (typeof slots)[number]) => {
+        const sprite = item.clip.sprite
+        if (!sprite?.url) {
+          videoSlots.push(item)
+          return
+        }
+        const bitmap = spriteCacheRef.current.get(sprite.url)
+        if (bitmap) {
+          drawCover(ctx, bitmap, spriteTileRect(sprite, item.localTime), slotX(item.slot), 0, slotWidth, slotHeight)
+        } else {
+          spritesToLoad.add(sprite.url)
+        }
+      }
+      slots.forEach(paintSprite)
+
+      if (spritesToLoad.size > 0) {
+        await Promise.all(
+          [...spritesToLoad].map(async (url) => {
+            if (spriteCacheRef.current.has(url)) {
+              return
+            }
+            try {
+              spriteCacheRef.current.set(url, await loadImageBitmap(url))
+            } catch {
+              // Sheet unreachable: its slots simply stay dark.
+            }
+          }),
+        )
+        if (cancelled) {
+          return
+        }
+        for (const item of slots) {
+          const sprite = item.clip.sprite
+          const bitmap = sprite?.url ? spriteCacheRef.current.get(sprite.url) : undefined
+          if (bitmap) {
+            drawCover(ctx, bitmap, spriteTileRect(sprite!, item.localTime), slotX(item.slot), 0, slotWidth, slotHeight)
+          }
+        }
+      }
+
+      if (videoSlots.length === 0) {
+        return
+      }
+
+      // Pass 2 — client-side extraction for spriteless clips (and deep zoom).
+      // Paint cached frames first, then seek the rest center-out from the
+      // playhead so the visible neighbourhood fills before the edges.
+      const frameKey = (item: (typeof slots)[number]) =>
+        `${item.clip.src}#${timeToFrame(item.localTime, stateFps)}`
+      const playhead = state.playlistCurrentTime
+      const pending: Array<(typeof slots)[number] & { key: string }> = []
+      for (const item of videoSlots) {
+        const key = frameKey(item)
+        const cached = frameCacheRef.current.get(key)
+        if (cached) {
+          drawCover(ctx, cached, { sx: 0, sy: 0, sw: cached.width, sh: cached.height }, slotX(item.slot), 0, slotWidth, slotHeight)
+        } else {
+          pending.push({ ...item, key })
+        }
+      }
+      pending.sort((a, b) => Math.abs(a.globalTime - playhead) - Math.abs(b.globalTime - playhead))
+
+      const failedSources = new Set<string>()
+      // video.src reflects the resolved absolute URL, so it can't be compared
+      // against clip.src (possibly relative) to detect source changes.
+      let loadedSrc: string | null = null
+
+      for (const item of pending) {
+        if (cancelled) {
+          return
+        }
+        if (failedSources.has(item.clip.src)) {
           continue
         }
-
-        if (loadedSrc !== clip.src) {
-          extractor.src = clip.src
+        if (loadedSrc !== item.clip.src) {
+          extractor.src = item.clip.src
           extractor.load()
           if (!(await waitForVideo(extractor, 'loadedmetadata'))) {
-            failedSources.add(clip.src)
+            failedSources.add(item.clip.src)
             loadedSrc = null
             continue
           }
-          loadedSrc = clip.src
+          loadedSrc = item.clip.src
         }
         if (cancelled) {
           return
         }
 
-        // Keep a safety margin from the clip end: seeking at/past duration can
-        // hang some decoders instead of firing `seeked`.
-        const localTime = clamp(globalTime - clip.startTime, 0, Math.max(clip.duration - 0.05, 0))
-        extractor.currentTime = localTime
-        if (!(await waitForVideo(extractor, 'seeked')) || cancelled) {
+        extractor.currentTime = item.localTime
+        if (!(await waitForPresentedFrame(extractor)) || cancelled) {
           if (cancelled) {
             return
           }
           continue
         }
-
-        const videoWidth = extractor.videoWidth
-        const videoHeight = extractor.videoHeight
-        if (videoWidth <= 0 || videoHeight <= 0) {
+        if (extractor.videoWidth <= 0 || extractor.videoHeight <= 0) {
           continue
         }
-        // Cover-fit crop so thumbnails fill their slot without distortion.
-        const scale = Math.max(slotWidth / videoWidth, slotHeight / videoHeight)
-        const sourceWidth = slotWidth / scale
-        const sourceHeight = slotHeight / scale
-        ctx.drawImage(
-          extractor,
-          (videoWidth - sourceWidth) / 2,
-          (videoHeight - sourceHeight) / 2,
-          sourceWidth,
-          sourceHeight,
-          slot * slotWidth,
-          0,
-          slotWidth,
-          slotHeight,
-        )
+
+        let bitmap: ImageBitmap
+        try {
+          bitmap = await createImageBitmap(extractor)
+        } catch {
+          continue
+        }
+        if (cancelled) {
+          bitmap.close()
+          return
+        }
+        rememberFrame(frameCacheRef.current, item.key, bitmap)
+        drawCover(ctx, bitmap, { sx: 0, sy: 0, sw: bitmap.width, sh: bitmap.height }, slotX(item.slot), 0, slotWidth, slotHeight)
       }
     }
 

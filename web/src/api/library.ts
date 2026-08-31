@@ -3,6 +3,18 @@ import axios from 'axios';
 // Same-origin in dev: Vite proxies /trackables and /media to Django.
 export const http = axios.create({ baseURL: '/' });
 
+/** Tiled filmstrip poster sheet: one frame every `interval` seconds, packed
+ *  into a `columns`-wide grid. Tile N lives at (N % columns, floor(N / columns)). */
+export interface VideoSpriteManifest {
+  url: string;
+  interval: number;
+  tile_width: number;
+  tile_height: number;
+  columns: number;
+  rows: number;
+  count: number;
+}
+
 export interface AssetSummary {
   id: number;
   code: string;
@@ -19,6 +31,7 @@ export interface AssetSummary {
   fps?: number | null;
   nb_frames?: number | null;
   codec?: string | null;
+  sprite?: VideoSpriteManifest | null;
   tags: string[];
   ai_description: string;
   ai_analysis_status: string;

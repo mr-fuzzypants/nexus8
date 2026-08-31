@@ -142,6 +142,9 @@ def asset_summary(asset):
         "fps": technical.get("fps"),
         "nb_frames": technical.get("nb_frames"),
         "codec": technical.get("codec"),
+        # Filmstrip sprite sheet manifest (absent when ffmpeg is unavailable or
+        # the sheet failed; the timeline falls back to client-side extraction).
+        "sprite": technical.get("sprite"),
         "tags": tags,
         "ai_description": data.get("ai_generated_description", ""),
         "ai_analysis_status": asset.ai_analysis_status,

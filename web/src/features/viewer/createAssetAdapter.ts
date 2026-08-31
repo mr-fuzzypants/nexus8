@@ -56,7 +56,7 @@ export async function createAssetViewerAdapter({
     return {
       kind,
       adapter: createVideoViewerAdapter(
-        [{ id: resolvedTarget, src: resolvedSrc, label: resolvedLabel }],
+        [{ id: resolvedTarget, src: resolvedSrc, label: resolvedLabel, sprite: asset.sprite }],
         { targetId: resolvedTarget, frameRate: asset.fps ?? undefined },
       ),
     }

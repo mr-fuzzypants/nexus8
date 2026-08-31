@@ -1,3 +1,4 @@
+import type { VideoSpriteManifest } from '../../../../api/library'
 import type { AnnotationFrame, Vec2, Vec3 } from '../annotations/types'
 import type {
   ViewerAction,
@@ -19,7 +20,11 @@ export interface VideoSourceOption {
   src: string
   type?: string
   label?: string
+  /** Precomputed filmstrip poster sheet for this clip; enables instant thumbnails. */
+  sprite?: VideoSpriteManifest | null
 }
+
+export type { VideoSpriteManifest }
 
 export interface VideoPlaylistClipState {
   id: string
@@ -31,6 +36,7 @@ export interface VideoPlaylistClipState {
   endTime: number
   width: number
   height: number
+  sprite?: VideoSpriteManifest | null
   error?: string
 }
 
@@ -169,6 +175,7 @@ function toPlaylistClip(source: VideoSourceOption, index: number): PlaylistClipI
     endTime: 0,
     width: DEFAULT_WIDTH,
     height: DEFAULT_HEIGHT,
+    sprite: source.sprite ?? null,
     error: undefined,
   }
 }
@@ -193,6 +200,7 @@ function clonePlaylistState(clips: PlaylistClipInternal[]): VideoPlaylistClipSta
     endTime: clip.endTime,
     width: clip.width,
     height: clip.height,
+    sprite: clip.sprite ?? null,
     error: clip.error,
   }))
 }

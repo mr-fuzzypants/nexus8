@@ -11,9 +11,11 @@ the existing asset instead of creating a duplicate.
 """
 
 import base64
+import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -27,6 +29,15 @@ from ..models import MediaAsset, Version
 
 THUMB_SIZES = (256, 1024)
 TINY_SIZE = 24  # inline blur-up placeholder, embedded as a data URI
+
+# Filmstrip sprite sheet: one poster frame every SPRITE_MIN_INTERVAL seconds
+# (stretched for long clips so the sheet never exceeds SPRITE_MAX_TILES), packed
+# into a SPRITE_COLUMNS-wide grid. The annotator draws slices of this single
+# decoded image for the base timeline instead of seeking the video per thumbnail.
+SPRITE_TILE_HEIGHT = 90
+SPRITE_COLUMNS = 12
+SPRITE_MAX_TILES = 240
+SPRITE_MIN_INTERVAL = 1.0
 
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif",
@@ -181,11 +192,12 @@ def _probe_video_file(path):
     return technical
 
 
-def _probe_video(rel_path, original_bytes):
-    """Resolve a local path for the stored video and ffprobe it.
+@contextlib.contextmanager
+def _local_video_path(rel_path, original_bytes):
+    """Yield a filesystem path to the stored video for ffprobe/ffmpeg.
 
-    Local storages expose a filesystem path directly; remote storages (which
-    raise NotImplementedError) get a short-lived temp copy to probe.
+    Local storages expose a path directly; remote storages (which raise
+    NotImplementedError) get a short-lived temp copy that is cleaned up on exit.
     """
     try:
         local_path = default_storage.path(rel_path)
@@ -193,7 +205,8 @@ def _probe_video(rel_path, original_bytes):
         local_path = None
 
     if local_path and os.path.exists(local_path):
-        return _probe_video_file(local_path)
+        yield local_path
+        return
 
     suffix = os.path.splitext(rel_path)[1]
     tmp_path = None
@@ -201,13 +214,99 @@ def _probe_video(rel_path, original_bytes):
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(original_bytes)
             tmp_path = tmp.name
-        return _probe_video_file(tmp_path)
+        yield tmp_path
     finally:
         if tmp_path:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def _build_video_sprite(local_path, content_hash, technical):
+    """Render a tiled sprite sheet of poster frames and return its manifest.
+
+    The annotator's filmstrip draws slices of this one image for the base
+    timeline — no per-thumbnail video seeking. Returns None (and the strip falls
+    back to client-side extraction) when ffmpeg is missing, the geometry is
+    unknown, or encoding fails.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    duration = _to_float(technical.get("duration"))
+    width = _to_int(technical.get("width"))
+    height = _to_int(technical.get("height"))
+    if not ffmpeg or not duration or not width or not height:
+        return None
+
+    interval = max(SPRITE_MIN_INTERVAL, duration / SPRITE_MAX_TILES)
+    count = min(SPRITE_MAX_TILES, max(1, int(duration // interval) + 1))
+    columns = min(count, SPRITE_COLUMNS)
+    rows = int(math.ceil(count / columns))
+    tile_height = SPRITE_TILE_HEIGHT
+    tile_width = int(round(tile_height * width / height))
+    if tile_width % 2:
+        tile_width += 1  # keep even so the scaler never rounds a column away
+    rate = 1.0 / interval
+
+    # JPEG (mjpeg) rather than WebP: mjpeg ships in every ffmpeg build, whereas
+    # libwebp is often absent; sprite sheets are photographic so JPEG suits them.
+    rel_sprite = f"assets/thumbs/{content_hash}_sprite.jpg"
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as out:
+        out_path = out.name
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-i", local_path,
+                "-frames:v", "1",
+                "-an",
+                "-vf",
+                f"fps={rate:.6f},scale={tile_width}:{tile_height},"
+                f"tile={columns}x{rows}:padding=0",
+                "-q:v", "4",
+                out_path,
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if proc.returncode != 0 or not os.path.getsize(out_path):
+            return None
+        with open(out_path, "rb") as handle:
+            sprite_bytes = handle.read()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+    default_storage.save(rel_sprite, io.BytesIO(sprite_bytes))
+    return {
+        "url": settings.MEDIA_URL + rel_sprite,
+        "interval": interval,
+        "tile_width": tile_width,
+        "tile_height": tile_height,
+        "columns": columns,
+        "rows": rows,
+        "count": count,
+    }
+
+
+def _probe_video(rel_path, original_bytes, content_hash):
+    """Probe a stored video and build its filmstrip sprite in one temp copy.
+
+    Returns the technical_metadata dict (with a ``sprite`` manifest when the
+    sheet was generated). ffprobe/ffmpeg failures degrade gracefully to {}.
+    """
+    with _local_video_path(rel_path, original_bytes) as local_path:
+        technical = _probe_video_file(local_path)
+        if technical:
+            sprite = _build_video_sprite(local_path, content_hash, technical)
+            if sprite:
+                technical["sprite"] = sprite
+        return technical
 
 
 def store_media_bytes(original_bytes, filename):
@@ -236,8 +335,9 @@ def store_media_bytes(original_bytes, filename):
             media_type = "file"
     elif media_type == "video":
         # Extract width/height/duration/fps/nb_frames/codec so the annotator can
-        # seek frame-accurately. ffprobe failures degrade gracefully to {}.
-        technical = _probe_video(rel_original, original_bytes)
+        # seek frame-accurately, plus a filmstrip sprite sheet for the timeline.
+        # ffprobe/ffmpeg failures degrade gracefully to {}.
+        technical = _probe_video(rel_original, original_bytes, content_hash)
 
     technical["file_size"] = len(original_bytes)
     return {
