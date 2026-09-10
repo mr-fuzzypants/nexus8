@@ -49,6 +49,39 @@ class LibraryAssetDetailView(APIView):
         asset = get_object_or_404(MediaAsset.objects, pk=pk)
         return Response(asset_summary(asset))
 
+    def patch(self, request, pk):
+        """Edit user-owned metadata: name, description, tags.
+
+        Partial update — only keys present in the body are touched. Tags accept
+        a list or a comma-separated string and replace the user tag list wholesale
+        (AI-suggested tags live separately and are untouched).
+        """
+        asset = get_object_or_404(MediaAsset.objects, pk=pk)
+        update_fields = ["updated_at"]
+
+        if "name" in request.data:
+            name = (request.data.get("name") or "").strip()
+            if name:
+                asset.name = name
+                update_fields.append("name")
+
+        if "description" in request.data:
+            asset.description = (request.data.get("description") or "").strip()
+            update_fields.append("description")
+
+        if "tags" in request.data:
+            raw = request.data.get("tags") or []
+            if isinstance(raw, str):
+                raw = raw.split(",")
+            tags = list(dict.fromkeys(t.strip() for t in raw if t and t.strip()))
+            data = dict(asset.type_data or {})
+            data["tags"] = tags
+            asset.type_data = data
+            update_fields.append("type_data")
+
+        asset.save(update_fields=update_fields)
+        return Response(asset_summary(asset))
+
 
 class AnnotationDocListCreateView(APIView):
     permission_classes = [permissions.IsAuthenticated]

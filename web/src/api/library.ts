@@ -33,6 +33,8 @@ export interface AssetSummary {
   codec?: string | null;
   sprite?: VideoSpriteManifest | null;
   tags: string[];
+  // User-editable tags only (excludes AI-suggested); the edit form binds to this.
+  user_tags?: string[];
   ai_description: string;
   ai_analysis_status: string;
   project_code: string;
@@ -99,6 +101,24 @@ export async function uploadFiles(files: File[], project?: string): Promise<Uplo
   for (const file of files) form.append('files', file);
   if (project) form.append('project', project);
   const { data } = await http.post<UploadResponse>('/trackables/api/library/upload/', form);
+  return data;
+}
+
+export interface AssetMetadataPatch {
+  name?: string;
+  description?: string;
+  tags?: string[];
+}
+
+/** Edit user-owned asset metadata (name/description/tags). Returns the updated summary. */
+export async function updateAsset(
+  assetId: number,
+  patch: AssetMetadataPatch,
+): Promise<AssetSummary> {
+  const { data } = await http.patch<AssetSummary>(
+    `/trackables/api/library/assets/${assetId}/`,
+    patch,
+  );
   return data;
 }
 

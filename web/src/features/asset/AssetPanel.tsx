@@ -1,6 +1,20 @@
-import { ActionIcon, Anchor, Badge, Button, Drawer, Group, Stack, Text, Tooltip } from '@mantine/core';
+import {
+  ActionIcon,
+  Anchor,
+  Badge,
+  Button,
+  Drawer,
+  Group,
+  Stack,
+  TagsInput,
+  Text,
+  Textarea,
+  TextInput,
+  Tooltip,
+} from '@mantine/core';
 import { useEffect, useState } from 'react';
 import {
+  IconEdit,
   IconExternalLink,
   IconEye,
   IconHeart,
@@ -10,8 +24,15 @@ import {
   IconShoppingBagCheck,
 } from '@tabler/icons-react';
 import { useLocation } from 'wouter';
-import { useQuery } from '@tanstack/react-query';
-import { assetIs3DModel, assetIsVideo, previewUrl, thumbUrl, type AssetSummary } from '../../api/library';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  assetIs3DModel,
+  assetIsVideo,
+  previewUrl,
+  thumbUrl,
+  updateAsset,
+  type AssetSummary,
+} from '../../api/library';
 import { listMasks } from '../annotator/annotatorApi';
 import { useLibraryStore } from '../../stores/library';
 import { useBasketStore } from '../../stores/basket';
@@ -99,8 +120,41 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
   const [, navigate] = useLocation();
   const { code } = useProject();
   const openViewer = useViewerStore((s) => s.open);
+  const queryClient = useQueryClient();
   const [selectedVersionNumber, setSelectedVersionNumber] = useState<number | null>(null);
-  useEffect(() => { setSelectedVersionNumber(null); }, [asset?.id]);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({ name: '', description: '', tags: [] as string[] });
+  useEffect(() => {
+    setSelectedVersionNumber(null);
+    setEditing(false);
+  }, [asset?.id]);
+
+  const save = useMutation({
+    mutationFn: () => {
+      if (!asset) throw new Error('no asset');
+      return updateAsset(asset.id, {
+        name: form.name.trim() || asset.name,
+        description: form.description,
+        tags: form.tags,
+      });
+    },
+    onSuccess: (updated) => {
+      queryClient.invalidateQueries({ queryKey: ['library-search'] });
+      queryClient.invalidateQueries({ queryKey: ['asset', updated.id] });
+      setEditing(false);
+      onOpenAsset?.(updated);
+    },
+  });
+
+  function startEditing() {
+    if (!asset) return;
+    setForm({
+      name: asset.name,
+      description: asset.description ?? '',
+      tags: asset.user_tags ?? [],
+    });
+    setEditing(true);
+  }
 
   return (
     <Drawer
@@ -148,6 +202,16 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
                 {isFavorite ? <IconHeartFilled size={17} /> : <IconHeart size={17} stroke={1.75} />}
               </ActionIcon>
             </Tooltip>
+            <Tooltip label="Edit details">
+              <ActionIcon
+                variant={editing ? 'light' : 'subtle'}
+                color="teal"
+                onClick={editing ? () => setEditing(false) : startEditing}
+                aria-label="Edit asset details"
+              >
+                <IconEdit size={17} stroke={1.75} />
+              </ActionIcon>
+            </Tooltip>
             <Anchor href={asset.file_path} target="_blank" rel="noreferrer" size="xs" c="dimmed">
               <Group gap={4}>
                 <IconExternalLink size={14} />
@@ -183,25 +247,65 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
             </Group>
           )}
 
-          {(asset.ai_description || asset.description) && (
-            <Text size="sm" c="dimmed">
-              {asset.ai_description || asset.description}
-            </Text>
-          )}
+          {editing ? (
+            <Stack gap="sm">
+              <TextInput
+                label="Name"
+                value={form.name}
+                onChange={(e) => setForm((f) => ({ ...f, name: e.currentTarget.value }))}
+              />
+              <Textarea
+                label="Description"
+                autosize
+                minRows={2}
+                maxRows={6}
+                value={form.description}
+                onChange={(e) => setForm((f) => ({ ...f, description: e.currentTarget.value }))}
+              />
+              <TagsInput
+                label="Tags"
+                description="AI-suggested tags are shown separately and can't be edited here."
+                value={form.tags}
+                onChange={(tags) => setForm((f) => ({ ...f, tags }))}
+                clearable
+              />
+              {save.isError && (
+                <Text size="xs" c="red">
+                  Couldn’t save changes. Please try again.
+                </Text>
+              )}
+              <Group gap="xs" justify="flex-end">
+                <Button variant="subtle" color="gray" onClick={() => setEditing(false)}>
+                  Cancel
+                </Button>
+                <Button color="teal" loading={save.isPending} onClick={() => save.mutate()}>
+                  Save
+                </Button>
+              </Group>
+            </Stack>
+          ) : (
+            <>
+              {(asset.ai_description || asset.description) && (
+                <Text size="sm" c="dimmed">
+                  {asset.ai_description || asset.description}
+                </Text>
+              )}
 
-          {asset.tags.length > 0 && (
-            <Group gap={6}>
-              {asset.tags.map((tag) => (
-                <Badge
-                  key={tag}
-                  variant="light"
-                  style={{ cursor: onTagClick ? 'pointer' : undefined, textTransform: 'none' }}
-                  onClick={() => onTagClick?.(tag)}
-                >
-                  {tag}
-                </Badge>
-              ))}
-            </Group>
+              {asset.tags.length > 0 && (
+                <Group gap={6}>
+                  {asset.tags.map((tag) => (
+                    <Badge
+                      key={tag}
+                      variant="light"
+                      style={{ cursor: onTagClick ? 'pointer' : undefined, textTransform: 'none' }}
+                      onClick={() => onTagClick?.(tag)}
+                    >
+                      {tag}
+                    </Badge>
+                  ))}
+                </Group>
+              )}
+            </>
           )}
 
           {asset.media_type === 'image' && (

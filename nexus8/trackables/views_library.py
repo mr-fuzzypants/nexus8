@@ -146,6 +146,9 @@ def asset_summary(asset):
         # the sheet failed; the timeline falls back to client-side extraction).
         "sprite": technical.get("sprite"),
         "tags": tags,
+        # User-editable tags only (excludes AI-suggested); the edit form binds
+        # to this so removing a tag actually sticks. Display still uses `tags`.
+        "user_tags": list(data.get("tags") or []),
         "ai_description": data.get("ai_generated_description", ""),
         "ai_analysis_status": asset.ai_analysis_status,
         "project_code": asset.project_code or "",
