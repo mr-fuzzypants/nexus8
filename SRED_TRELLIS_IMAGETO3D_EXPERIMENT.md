@@ -541,3 +541,235 @@ existing BVH), **Draco+KTX2** compression, turntable **thumbnail**; then Phase 3
 synthesis, Phase 4 Django integration, Phase 5 frontend. Deferred niceties: metallic/roughness
 are baked into the packed MR texture and round-trip in the GLB, but the flat-lit validation
 render doesn't visualize them (a PBR/IBL render is a Phase-3 nicety).
+
+---
+
+# Part F — Phase 3 results (normal map + compression + thumbnail, 2026-09-09)
+
+Added the three finishing steps to `commercial_to_glb`/`generate()`. **Normal-map bake and
+viewer-ready compression both work; the compressed GLB is exactly the format the Three.js
+viewer consumes.** Validated offline on the Phase-1 dump.
+
+### T-P5 — Tangent-space normal map, free from the existing BVH (T-F6)
+Stock TRELLIS.2 bakes no normal map (vertex normals only). We add one at no extra cost: reuse
+the per-texel `bvh.unsigned_distance` `face_id`+`uvw` (already computed for drift correction) to
+sample the **original hi-res mesh normals**, and express them in the **decimated mesh's tangent
+frame** — Lengyel per-vertex tangents from UVs (`_vertex_tangents`), interpolated per texel via
+the same PyTorch3D raster (`pix_to_face`+`bary`), Gram-Schmidt orthonormalized; encode in the
+standard glTF/OpenGL (+V = green) convention. No explicit `TANGENT` export → relies on Three.js's
+derivative-tangent path (same +U/+V convention). The baked atlas is well-formed (lavender flat
+base with directional detail tracking the surface, gem bosses visible). **Caveat:** green-channel
+sign / handedness correctness can't be verified in the flat PyTorch3D render — it needs a real
+PBR renderer, so it is **deferred to Phase 5 (Three.js)**; if inverted it's a 1-line fix
+(flip green or the handedness `sgn`). No Embree needed, confirming T-F6.
+
+### T-P6 — Compression: meshopt + KTX2 via gltfpack (67 MB → 10.9 MB, 6.1×)
+`_compress_glb` shells out to **gltfpack** (`-cc` meshopt geometry, `-tc` KTX2/basis textures).
+Result on the crown at 2048³-tex / ~1 M faces: **67.0 MB → 10.9 MB**. The output uses
+`EXT_meshopt_compression` + `KHR_texture_basisu` (image/ktx2) + `KHR_mesh_quantization` +
+`KHR_texture_transform` — **all supported by the viewer's `MeshoptDecoder` + `KTX2Loader`**
+(the plan said "Draco"; **meshopt is the substitute — equivalent, and the viewer already wires
+`MeshoptDecoder`**). Material carries baseColor + **normalTexture** + metallicRoughness.
+**Build gotcha:** the `gltfpack-ubuntu.zip` v0.24 binary needs GLIBC 2.38 (Ubuntu 24.04) and
+fails on our 22.04 base — pinned **v0.22** (GLIBC 2.35). *Refinement:* gltfpack `-tc` defaults to
+ETC1S; normal maps prefer **UASTC** (`-tu`) — worth switching per-texture to avoid normal
+degradation (deferred).
+
+### T-P7 — Thumbnail
+`generate()` renders a single hero view (PyTorch3D `TexturesUV`) as the asset thumbnail
+(3D assets have none today). The offline harness renders a 4-view montage for QA.
+
+### Artifacts (downloaded locally)
+`/tmp/trellis_phase3/`: `glb.glb` (**compressed 10.9 MB, meshopt+KTX2, full PBR incl. normal**),
+`basecolor_png.png`, `normal_png.png`, `render_png.png`. (Uncompressed reference:
+`/tmp/trellis_phase2/generated.glb`, 57 MB.)
+
+### Phase 3 verdict
+**Full commercial PBR export is viewer-ready:** seam-free base color + metallic-roughness +
+alpha + normal map, meshopt+KTX2-compressed to ~11 MB, matching the Three.js loader stack.
+Remaining: Phase 3b (splat synthesis), Phase 4 (Django dispatch/poll/ingest + `3d_model`
+storage), Phase 5 (frontend trigger + splat viewer + **normal-map correctness validation**).
+
+---
+
+# Part G — Phase 4 results (Django integration, 2026-09-10)
+
+Wired the deployed Modal app into the Django backend with the established spawn/poll envelope,
+and validated the whole path end-to-end through the real DRF views. **H6 confirmed: a generated
+3D asset slots into the existing library/versioning model as a first-class asset with lineage.**
+
+### Endpoints (`nexus8/trackables/views_trellis.py`, app `nexus8-trellis2`)
+- `POST /api/library/assets/<pk>/image-to-3d/` — dispatch from an existing image asset.
+- `GET  /api/library/assets/<pk>/image-to-3d/status/?call_id=…` — poll; on done, ingest + return.
+- `POST /api/library/image-to-3d/` — standalone: upload an image → `ingest_file` it as the source
+  → dispatch (poll via the asset-scoped status endpoint with the returned `asset_id`+`call_id`).
+Mirrors `views_inpaint` (`modal.Cls.from_name(...).generate.spawn(...)` →
+`FunctionCall.from_id(call_id).get(timeout=0)`); pending run state lives on
+`source.type_data["gen3d"][call_id]` (no task queue, like inpaint's relation state).
+
+### Ingest of a generated binary (`services/ingest.py`)
+Added `ingest_generated_asset(bytes, *, filename, thumbnail_bytes, media_type, name, created_by,
+upstream, generation)` — takes raw bytes (not an upload), lets the caller set `media_type`
+(`_media_type_for` now maps `.glb/.gltf` → `3d_model`), **attaches the Modal-rendered hero PNG as
+the thumbnail** (3D binaries don't self-thumbnail — closes the "`.glb` ingests with no preview"
+gap), and records `upstream` lineage + a `generation` provenance record via `MediaAsset.publish`.
+
+### End-to-end validation (real views, `manage.py shell`)
+Standalone upload of the sample image → source asset **#344** → dispatch → poll → new asset
+**#345**: `media_type=3d_model`, `file_path=…/originals/…​.glb`, **thumbnail present** (256 webp
+from the Modal render), **lineage `init_image` → #344 v1**, and an **idempotent re-poll returns
+#345** (no duplicate ingest). `assetIs3DModel` matches (media_type + `.glb`) → routes to the
+Three.js viewer with no frontend change. Compressed GLB from the deployed app: **8.25 MB**
+(fast tier, 1024² textures) + 137 KB thumbnail.
+
+### T-P8 — Cold-start latency
+The **first** call after `modal deploy` exceeded a 7.5-min poll window (A100-80GB image pull +
+4B-weights + DINOv3/BiRefNet load from the Volume to GPU); the call itself completed fine and
+warm calls are fast. The frontend must poll patiently (Phase 5); an optional `min_containers=1`
+would keep a container warm at cost. Not a correctness issue.
+
+### Phase 4 verdict
+**Backend integration works and is validated.** Splat output is rejected at dispatch until
+Phase 3b. Remaining: Phase 3b (splat synthesis) and Phase 5 (frontend AssetPanel "Generate 3D"
+trigger + standalone panel + splat viewer adapter + normal-map correctness check in three.js).
+
+---
+
+# Part H — Phase 5 results (frontend trigger, 2026-09-10)
+
+Wired the user-facing **"Generate 3D"** action into the library. The mesh path is complete and
+needs no viewer change; the splat viewer adapter is deferred with Phase 3b (no splats yet).
+
+### API client (`web/src/api/library.ts`)
+`generateImageTo3D(assetId, {tier})` → `POST …/assets/<id>/image-to-3d/`; `imageTo3DStatus(assetId,
+callId)` → `GET …/status/?call_id=`; types `Gen3DTier` and `ImageTo3DStatus` (carries the new
+`AssetSummary` on done). Uses the shared axios `http` client like the rest of the library API.
+
+### AssetPanel action (`web/src/features/asset/AssetPanel.tsx`)
+On image assets only: a **Fast/Balanced/Max** `SegmentedControl` + a **Generate 3D** button.
+Dispatch via `useMutation`; poll via `useQuery` with `refetchInterval` 4 s that stops on
+`done`/`error`; on completion it invalidates `['library-search']` and calls
+`useViewerStore().open({ asset: result })` so the new model opens in the existing Three.js
+viewer. The pending call is scoped to its asset id (switching assets disables the poll without a
+reset effect), completion side-effects fire once via a ref (avoids `react-hooks/set-state-in-
+effect`), and the button "working" state derives from the poll status. **No viewer/adapter change
+needed** — `assetIs3DModel` already routes `media_type='3d_model'`/`.glb` to `threeModelViewerAdapter`.
+
+### Deferred / not-in-scope-yet
+Standalone drop-an-image panel and the **Gaussian-splat viewer adapter** wait on Phase 3b (the
+backend already rejects `output_format='splat'`, so no dead UI is exposed — the tier control ships
+mesh-only). **Normal-map correctness in three.js** (green-channel/handedness from T-P5) still needs
+a visual check in the running viewer — a 1-line fix if inverted.
+
+### Validation
+`AssetPanel.tsx` + `library.ts` are **type-clean** (isolated `tsc`) and **eslint-clean** for the new
+code. Pre-existing type/lint debt elsewhere in the working tree (`AnnotatorPage.tsx`,
+`workflows/*`, and the file's own pre-existing reset-effect lint) is unrelated to this change and
+untouched. Live in-browser click-through of the full flow is the remaining manual step (gated by
+the T-P8 cold start on first call).
+
+### Phase 5 verdict
+**Image→3D is usable end-to-end from the UI (mesh path):** select an image → Generate 3D → the
+textured GLB lands as a library asset and opens in the viewer. Remaining: Phase 3b splats
+(+ splat viewer + standalone panel), in-browser visual QA incl. the normal-map check.
+
+---
+
+# Part I — Field finding: stochastic flat-plane collapse + seed fix (2026-09-12)
+
+First real-image UI test surfaced a **flat-plane** result (a puppy photo, asset #126 → #350).
+Localized it end to end:
+
+- **Input good:** clean puppy photo; **background removal good** — the `preprocess_probe`
+  (permissive `ZhengPeng7/BiRefNet`) returned a cleanly isolated puppy on black, ~46% frame
+  coverage. So neither the image nor our rembg swap was at fault.
+- **Raw mesh flat:** running generation and measuring `mesh.vertices` bbox gave extent
+  **[1.0, 0.0001, 1.0]** (flatness_ratio ≈ 6e-5) — i.e. **TRELLIS.2's shape stage itself
+  produced a full-frame billboard**, not our bake (crown/robot came out volumetric).
+- **Seed-dependent:** re-running the *same image* with `seed=42` gave extent flatness_ratio
+  **0.50** (2.41M verts) — a proper 3D puppy. So it's a **stochastic shape-collapse for a given
+  (image, seed)** — a known image-to-3D failure mode — and our pipeline **hardcoded `seed=0`**
+  when the caller didn't pin one, making the failure deterministic on that image.
+
+**Fix (`views_trellis._parse_params`):** when no seed is supplied, **randomize** it
+(`random.randint`) and record it in the generation provenance. Every dispatch/retry is now a
+fresh attempt, so clicking "Generate 3D" again escapes a flat collapse; the seed is reproducible
+from the stored `generation` record. (Future: a "Regenerate"/seed control in the UI, and
+optionally raising the sparse-structure guidance for shape robustness.)
+
+---
+
+# Part J — Robustness hardening + current status (2026-09-12)
+
+Field testing (real user images, real UI) drove three robustness experiments beyond the
+happy-path pipeline. All are implemented and validated except where noted.
+
+## J1 — Auto-retry-on-flat (supersedes the Part I seed-randomization fix)
+
+Part I's "randomize the seed once" proved **insufficient**: the flat-prone puppy collapses on
+*most* seeds, not just seed 0 (measured raw-mesh flatness_ratio — seed 0: 6e-5, seed
+1165467518: flat, seed 42: 0.50, seed 1749815593: 0.49). A single random draw is a coin flip.
+
+**Design.** The flatness is decided at TRELLIS's *sparse-structure* stage and is a multimodal,
+seed-dependent draw (a textured billboard is a globally-consistent explanation of a single
+input view, so it's a degenerate attractor for depth-ambiguous images). So the fix moved into
+Modal `generate()`, where the mesh is measurable:
+- Django sends `seed=None` unless the user pins one (Modal owns seeding).
+- `generate()` loops up to **4 random seeds**, escalating sparse-structure guidance
+  (`guidance_strength` 7.5 → 10) on later attempts, measures `extent_min/extent_max`, and
+  **stops at the first non-flat mesh** (≥ 0.05). A pinned seed is honoured verbatim (no retry).
+- Returns a 3-tuple `(glb, thumb, meta)`; `meta = {seed, flatness, attempts[], flat_warning}`.
+  Django records `meta` in the asset's `generation` provenance; a pinned/failed case surfaces
+  `flat_warning`.
+
+**Result.** The formerly-flat puppy now yields a proper volumetric mesh — validated end to end:
+asset #363, flatness 0.49, renders as a real 3D puppy in the Three.js viewer. The retry cost is
+paid only when a collapse actually happens.
+
+## J2 — Resume-polling after page refresh
+
+**Problem (observed).** The SPA held the poll's `call_id` only in React memory; a page reload
+dropped it. Because the result is **ingested lazily when a poll completes**, a finished Modal
+job with no live poller became an orphan (done on Modal, never turned into an asset) — the user
+saw nothing.
+
+**Fix.** The backend already persists every dispatched call on the source
+(`type_data["gen3d"][call_id]`). Added `GET …/image-to-3d/pending/`
+(`ImageTo3DPendingView`) returning the latest still-`working` call. `AssetPanel` now computes
+`activeCall = fresh-dispatch-this-session ?? server-pending` and drives the existing poll from
+it, so opening the asset **resumes polling and ingests a finished-but-unpolled job** on first
+visit. Verified: endpoint returns the working call (and null when idle); self-heals the orphan
+case. (Belt-and-suspenders server-side reconcile — ingest without any browser poll — remains a
+future option.)
+
+## J3 — Pre-generation flat-risk warning (designed, not built)
+
+Since the flat collapse traces to missing depth cues, it is **predictable before spending a
+generation**. Three tiers proposed: (1) surface the existing post-hoc `flat_warning` (free);
+(2) **recommended** — monocular depth (Depth Anything V2-small, Apache-2.0) variance *inside
+the BiRefNet subject mask* + mask-fills-frame + background-blur → a non-blocking "may come out
+flat — Generate anyway?" banner; (3) a sparse-structure planarity probe (~2 s GPU, most
+accurate, could auto-gate). No predictor is perfect (stochastic), so this is a soft warning with
+auto-retry (J1) as the safety net. **Deferred pending go-ahead.**
+
+## J4 — Other field fixes
+- Generated assets now inherit the **source's `project_id`** (`ingest_generated_asset`) — else
+  they were project-less and hidden from the project-scoped library grid.
+- Modal class `timeout` 600 → 1800 s (cold-start weight load + max-tier gen + bake + KTX2).
+
+## Current status (phases)
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Licensing/API audit | ✅ done (Part C) |
+| 1 | Clean build + generation on Modal | ✅ done (Part D) |
+| 2 | Seam-free commercial bake (PyTorch3D swap) | ✅ done (Part E) |
+| 3 | Normal map + meshopt/KTX2 compression + thumbnail | ✅ done (Part F) |
+| 3b | Gaussian-splat synthesis | ⏳ not started |
+| 4 | Django dispatch/poll/ingest + `3d_model` storage | ✅ done (Part G) |
+| 5 | Frontend "Generate 3D" trigger (mesh) | ✅ done (Part H); UI verified via Playwright |
+| — | Auto-retry-on-flat (J1), resume-after-refresh (J2), project/timeout (J4) | ✅ done |
+| — | Pre-gen flat warning (J3), splat viewer, standalone panel, seed/Regenerate control, normal-map three.js check, resume server-side reconcile | ⏳ deferred |
+
+**Net:** commercial, seam-free image→textured-3D is working end to end from the UI on Modal,
+with the two field-failure modes (flat collapse, lost-on-refresh) fixed. All feature work is
+currently uncommitted on `main`.

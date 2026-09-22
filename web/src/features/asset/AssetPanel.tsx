@@ -5,6 +5,7 @@ import {
   Button,
   Drawer,
   Group,
+  SegmentedControl,
   Stack,
   TagsInput,
   Text,
@@ -12,8 +13,9 @@ import {
   TextInput,
   Tooltip,
 } from '@mantine/core';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  IconCube,
   IconEdit,
   IconExternalLink,
   IconEye,
@@ -28,10 +30,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   assetIs3DModel,
   assetIsVideo,
+  generateImageTo3D,
+  imageTo3DPending,
+  imageTo3DStatus,
   previewUrl,
   thumbUrl,
   updateAsset,
   type AssetSummary,
+  type Gen3DTier,
 } from '../../api/library';
 import { listMasks } from '../annotator/annotatorApi';
 import { useLibraryStore } from '../../stores/library';
@@ -124,10 +130,65 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
   const [selectedVersionNumber, setSelectedVersionNumber] = useState<number | null>(null);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: '', description: '', tags: [] as string[] });
+  const [gen3dTier, setGen3dTier] = useState<Gen3DTier>('balanced');
+  // Scope the pending call to its asset id so switching assets naturally disables the poll
+  // (no reset-on-change effect needed).
+  const [gen3d, setGen3d] = useState<{ assetId: number; callId: string } | null>(null);
+  const gen3dHandled = useRef<string | null>(null);
   useEffect(() => {
     setSelectedVersionNumber(null);
     setEditing(false);
   }, [asset?.id]);
+
+  // Image → 3D: dispatch to Modal, then poll until the new 3d_model asset lands.
+  const generate3d = useMutation({
+    mutationFn: () => {
+      if (!asset) throw new Error('no asset');
+      return generateImageTo3D(asset.id, { tier: gen3dTier });
+    },
+    onSuccess: (d) => {
+      if (asset) setGen3d({ assetId: asset.id, callId: d.call_id });
+    },
+  });
+  // Resume-after-refresh: call ids only live in memory, but the backend persists in-flight
+  // jobs on the asset. On open we ask for any still-running call and adopt it, so a reload
+  // (or a job that finished while away) still lands its result.
+  const isImage = asset?.media_type === 'image';
+  const pendingQuery = useQuery({
+    queryKey: ['image-to-3d-pending', asset?.id],
+    queryFn: () => imageTo3DPending(asset!.id),
+    enabled: Boolean(asset && isImage),
+  });
+  // A fresh dispatch this session wins; otherwise adopt the server's persisted pending call.
+  const activeCall = useMemo(() => {
+    if (gen3d && asset && gen3d.assetId === asset.id) return gen3d;
+    if (asset && pendingQuery.data?.call_id) {
+      return { assetId: asset.id, callId: pendingQuery.data.call_id };
+    }
+    return null;
+  }, [gen3d, asset, pendingQuery.data]);
+  const gen3dPoll = useQuery({
+    queryKey: ['image-to-3d', activeCall?.assetId, activeCall?.callId],
+    queryFn: () => imageTo3DStatus(activeCall!.assetId, activeCall!.callId),
+    enabled: Boolean(activeCall),
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return s === 'done' || s === 'error' ? false : 4000;
+    },
+  });
+  useEffect(() => {
+    const data = gen3dPoll.data;
+    if (!activeCall || !data || data.status !== 'done' || !data.result) return;
+    // Fire once per call: ref guard avoids re-opening on incidental re-renders.
+    if (gen3dHandled.current === activeCall.callId) return;
+    gen3dHandled.current = activeCall.callId;
+    queryClient.invalidateQueries({ queryKey: ['library-search'] });
+    queryClient.invalidateQueries({ queryKey: ['image-to-3d-pending', activeCall.assetId] });
+    openViewer({ asset: data.result });
+  }, [gen3dPoll.data, activeCall, openViewer, queryClient]);
+  const gen3dStatus = activeCall ? gen3dPoll.data?.status : undefined;
+  const gen3dWorking =
+    generate3d.isPending || (Boolean(activeCall) && gen3dStatus !== 'done' && gen3dStatus !== 'error');
 
   const save = useMutation({
     mutationFn: () => {
@@ -245,6 +306,47 @@ export function AssetPanel({ asset, onClose, onTagClick, onOpenAsset }: AssetPan
                     : 'Annotate & mask'}
               </Button>
             </Group>
+          )}
+
+          {asset.media_type === 'image' && (
+            <Stack gap={6}>
+              <Group gap="xs" grow align="flex-end">
+                <SegmentedControl
+                  size="xs"
+                  value={gen3dTier}
+                  onChange={(v) => setGen3dTier(v as Gen3DTier)}
+                  disabled={gen3dWorking}
+                  data={[
+                    { label: 'Fast', value: 'fast' },
+                    { label: 'Balanced', value: 'balanced' },
+                    { label: 'Max', value: 'max' },
+                  ]}
+                />
+                <Button
+                  color="grape"
+                  leftSection={<IconCube size={16} stroke={1.75} />}
+                  loading={gen3dWorking}
+                  onClick={() => generate3d.mutate()}
+                >
+                  Generate 3D
+                </Button>
+              </Group>
+              {gen3dWorking && (
+                <Text size="xs" c="dimmed">
+                  Generating a 3D model… this can take a minute (longer on the first run).
+                </Text>
+              )}
+              {generate3d.isError && (
+                <Text size="xs" c="red">
+                  Could not start generation.
+                </Text>
+              )}
+              {gen3dStatus === 'error' && (
+                <Text size="xs" c="red">
+                  {gen3dPoll.data?.detail || 'Generation failed.'}
+                </Text>
+              )}
+            </Stack>
           )}
 
           {editing ? (

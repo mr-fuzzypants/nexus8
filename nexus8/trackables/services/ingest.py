@@ -43,6 +43,9 @@ IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif",
 }
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
+# .glb/.gltf are unambiguous meshes; .ply is left as generic (often a mesh, but our
+# generated splats set media_type explicitly) so extension inference stays safe.
+MODEL_EXTENSIONS = {".glb", ".gltf", ".fbx", ".obj", ".blend"}
 
 
 def _slugify(value):
@@ -55,6 +58,8 @@ def _media_type_for(extension):
         return "image"
     if extension in VIDEO_EXTENSIONS:
         return "video"
+    if extension in MODEL_EXTENSIONS:
+        return "3d_model"
     return "file"
 
 
@@ -452,3 +457,77 @@ def add_version(asset, uploaded_file, *, created_by=None, version_number=None,
     asset.ai_analysis_status = "pending"
     asset.save(update_fields=["type_data", "ai_analysis_status", "updated_at"])
     return version, True
+
+
+def _thumbs_from_image_bytes(image_bytes, content_hash):
+    """Build the thumbnail pyramid + placeholder from a pre-rendered preview image
+    (e.g. a Modal-rendered turntable of a 3D asset). Returns (thumbnails, placeholder)."""
+    thumbnails, _technical, placeholder = _build_pyramid(image_bytes, content_hash)
+    return thumbnails, placeholder
+
+
+def ingest_generated_asset(asset_bytes, *, filename, thumbnail_bytes=None, media_type=None,
+                           name=None, created_by=None, upstream=None, generation=None,
+                           project_id=None):
+    """Ingest a machine-generated binary asset (e.g. a GLB / splat from image-to-3D) as a
+    first-class MediaAsset with an optional pre-rendered thumbnail and lineage edges.
+
+    Unlike ``ingest_file`` this (a) takes raw bytes, (b) lets the caller set ``media_type``
+    (extension inference maps .glb/.gltf → 3d_model; splats pass 'gaussian_splat' explicitly),
+    (c) attaches a supplied preview image as the thumbnail (3D binaries aren't self-thumbnailing),
+    and (d) records ``upstream`` lineage (e.g. {'init_image': source_version}) + a ``generation``
+    provenance record. Returns (asset, version, created).
+    """
+    content_hash = hashlib.sha256(asset_bytes).hexdigest()
+    existing = (
+        Version.objects.filter(content_hash=content_hash).select_related("entity").first()
+    )
+    if existing is not None:
+        return existing.entity, existing, False
+
+    _, extension = os.path.splitext(filename or "asset.glb")
+    extension = extension.lower()
+    media_type = media_type or _media_type_for(extension)
+
+    rel_original = f"assets/originals/{content_hash}{extension}"
+    if not default_storage.exists(rel_original):
+        default_storage.save(rel_original, io.BytesIO(asset_bytes))
+    original_url = settings.MEDIA_URL + rel_original
+
+    thumbnails, placeholder = {}, ""
+    if thumbnail_bytes:
+        try:
+            thumbnails, placeholder = _thumbs_from_image_bytes(thumbnail_bytes, content_hash)
+        except Exception:
+            thumbnails, placeholder = {}, ""
+    technical = {"file_size": len(asset_bytes)}
+
+    display_name = name or os.path.splitext(filename)[0]
+    asset = MediaAsset.objects.create(
+        code=f"{_slugify(display_name)}_{content_hash[:10]}",
+        name=display_name,
+        project_id=project_id or None,  # scope to the source's project so it shows in the grid
+        type_data={
+            "file_path": original_url,
+            "media_type": media_type,
+            "original_filename": filename,
+            "thumbnails": thumbnails,
+            "placeholder": placeholder,
+            "technical_metadata": technical,
+            "tags": [],
+        },
+    )
+    data = {
+        "file_path": original_url,
+        "thumbnails": thumbnails,
+        "technical_metadata": technical,
+    }
+    if generation:
+        data["generation"] = generation
+    version = asset.publish(
+        data=data,
+        content_hash=content_hash,
+        created_by=created_by,
+        upstream=upstream or None,
+    )
+    return asset, version, True

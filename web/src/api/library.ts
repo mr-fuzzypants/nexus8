@@ -122,6 +122,51 @@ export async function updateAsset(
   return data;
 }
 
+export type Gen3DTier = 'fast' | 'balanced' | 'max';
+
+/** Poll response for an in-flight image→3D generation. */
+export interface ImageTo3DStatus {
+  status: 'working' | 'done' | 'error';
+  result?: AssetSummary; // the new 3d_model asset, present when status === 'done'
+  detail?: string;
+  dispatched_at?: string;
+}
+
+/** Dispatch an image→3D generation (TRELLIS.2) for an image asset. Returns the Modal call id. */
+export async function generateImageTo3D(
+  assetId: number,
+  opts: { tier?: Gen3DTier; texture_size?: number } = {},
+): Promise<{ call_id: string; status: string }> {
+  const { data } = await http.post<{ call_id: string; status: string }>(
+    `/trackables/api/library/assets/${assetId}/image-to-3d/`,
+    { tier: opts.tier ?? 'balanced', texture_size: opts.texture_size ?? 2048 },
+  );
+  return data;
+}
+
+/** Poll an in-flight image→3D generation; carries the new 3d_model asset on completion. */
+export async function imageTo3DStatus(
+  assetId: number,
+  callId: string,
+): Promise<ImageTo3DStatus> {
+  const { data } = await http.get<ImageTo3DStatus>(
+    `/trackables/api/library/assets/${assetId}/image-to-3d/status/`,
+    { params: { call_id: callId } },
+  );
+  return data;
+}
+
+/** The asset's latest still-running image→3D job, so the panel can resume polling after a page
+ *  reload (call ids are persisted server-side). `call_id` is null when nothing is in flight. */
+export async function imageTo3DPending(
+  assetId: number,
+): Promise<{ call_id: string | null; status?: string; dispatched_at?: string }> {
+  const { data } = await http.get<{ call_id: string | null }>(
+    `/trackables/api/library/assets/${assetId}/image-to-3d/pending/`,
+  );
+  return data;
+}
+
 /** Best rendition for a card at the given display width. */
 export function thumbUrl(asset: AssetSummary, displayWidth: number): string {
   const { thumbnails, file_path } = asset;

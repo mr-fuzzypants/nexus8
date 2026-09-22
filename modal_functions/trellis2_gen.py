@@ -110,7 +110,17 @@ image = (
     .run_commands(
         "pip install 'git+https://github.com/facebookresearch/pytorch3d.git@stable' --no-build-isolation",
     )
-    # TODO(phase3/3b): + pyrender (thumbnails) + gsplat (splat export) as later layers.
+    # gltfpack (meshoptimizer): meshopt geometry compression + KTX2/basis textures — both
+    # supported by the viewer's MeshoptDecoder + KTX2Loader. Prebuilt binary, no node needed.
+    .apt_install("unzip", "curl")
+    .run_commands(
+        # v0.22 prebuilt is linked against GLIBC 2.35 (Ubuntu 22.04, our base); v0.24 needs 2.38.
+        "curl -sSL -o /tmp/gltfpack.zip "
+        "https://github.com/zeux/meshoptimizer/releases/download/v0.22/gltfpack-ubuntu.zip && "
+        "cd /tmp && unzip -o gltfpack.zip && chmod +x gltfpack && mv gltfpack /usr/local/bin/gltfpack && "
+        "gltfpack -h 2>/dev/null | head -1",
+    )
+    # TODO(phase3b): + gsplat (splat export) as a later layer.
 )
 
 
@@ -167,6 +177,13 @@ def probe_build(image_bytes: bytes, tier: str = "fast", seed: int = 0) -> dict:
 
     restricted_after = [m for m in ("nvdiffrast", "nvdiffrec", "nvdiffrec_render") if m in sys.modules]
 
+    v = mesh.vertices.detach().cpu().numpy()
+    vmin, vmax = v.min(0), v.max(0)
+    extent = (vmax - vmin)
+    bbox = {"min": vmin.round(4).tolist(), "max": vmax.round(4).tolist(),
+            "extent": extent.round(4).tolist(),
+            "flatness_ratio": float(extent.min() / max(extent.max(), 1e-9))}
+
     dump_path = f"{CACHE_DIR}/phase1_dump_{tier}.npz"
     layout = {k: (v.start, v.stop) for k, v in mesh.layout.items()}
     np.savez(
@@ -186,6 +203,7 @@ def probe_build(image_bytes: bytes, tier: str = "fast", seed: int = 0) -> dict:
         "restricted_after_gen": restricted_after,
         "num_vertices": int(mesh.vertices.shape[0]),
         "num_faces": int(mesh.faces.shape[0]),
+        "raw_mesh_bbox": bbox,
         "attr_volume_shape": list(mesh.attrs.shape),
         "coords_shape": list(mesh.coords.shape),
         "attr_layout": layout,
@@ -231,6 +249,45 @@ def diag():
     print("DIAGNOSE_RESULT:", diagnose.remote())
 
 
+@app.function(
+    image=trellis_image, gpu="A10G", timeout=600,
+    volumes={CACHE_DIR: weights_volume}, secrets=[hf_secret],
+)
+def preprocess_probe(image_bytes: bytes) -> dict:
+    """Run just the permissive BiRefNet background removal (what TRELLIS.preprocess_image uses)
+    and report how much of the frame it kept — diagnoses 'flat plane' (mask covers whole frame)."""
+    import io
+    import numpy as np
+    from PIL import Image
+    from trellis2.pipelines import rembg
+
+    model = rembg.BiRefNet("ZhengPeng7/BiRefNet")  # permissive, commercial
+    model.cuda()
+    inp = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    out = model(inp)  # RGBA: original RGB + predicted alpha mask
+    arr = np.array(out)
+    alpha = arr[:, :, 3]
+    coverage = float((alpha > 0.8 * 255).mean())  # fraction of frame kept as "subject"
+    f = arr.astype(np.float32) / 255
+    comp = (f[:, :, :3] * f[:, :, 3:4] * 255).astype("uint8")  # composite on black (as pipeline does)
+    cbuf = io.BytesIO(); Image.fromarray(comp).save(cbuf, "PNG")
+    mbuf = io.BytesIO(); Image.fromarray(alpha).save(mbuf, "PNG")
+    return {"coverage": coverage, "cutout_png": cbuf.getvalue(), "mask_png": mbuf.getvalue()}
+
+
+@app.local_entrypoint()
+def preprocess(image: str, out: str = "/tmp/pw"):
+    import os, json
+    with open(image, "rb") as fh:
+        r = preprocess_probe.remote(fh.read())
+    os.makedirs(out, exist_ok=True)
+    with open(f"{out}/pre_cutout.png", "wb") as f:
+        f.write(r.pop("cutout_png"))
+    with open(f"{out}/pre_mask.png", "wb") as f:
+        f.write(r.pop("mask_png"))
+    print("PREPROCESS:", json.dumps(r), "-> saved cutout/mask to", out)
+
+
 @app.local_entrypoint()
 def probe(image: str = "", tier: str = "fast", seed: int = 0):
     """Phase 1 runner:  modal run modal_functions/trellis2.py::probe --image sample.webp"""
@@ -246,7 +303,7 @@ def probe(image: str = "", tier: str = "fast", seed: int = 0):
 @app.cls(
     image=image,
     gpu="A100-80GB",
-    timeout=600,
+    timeout=1800,  # generous: cold-start weight load + max-tier gen + bake + KTX2 compression
     scaledown_window=300,
     volumes={CACHE_DIR: weights_volume},
     secrets=[hf_secret],
@@ -262,6 +319,18 @@ class Trellis2Generator:
         self.pipeline.cuda()
         weights_volume.commit()
 
+    def _run_once(self, img, ptype, seed, ss_guidance):
+        """One shape+texture generation; returns (mesh, flatness_ratio)."""
+        outputs = self.pipeline.run(
+            img, seed=seed, pipeline_type=ptype,
+            sparse_structure_sampler_params={"guidance_strength": ss_guidance},
+        )
+        mesh = outputs[0]
+        v = mesh.vertices.detach().float()
+        ext = (v.max(0).values - v.min(0).values)
+        flatness = float((ext.min() / ext.max().clamp(min=1e-9)).item())
+        return mesh, flatness
+
     @modal.method()
     def generate(
         self,
@@ -272,27 +341,52 @@ class Trellis2Generator:
         want_normal: bool = True,
         output_format: str = "glb",  # "glb" | "splat"
         seed: int | None = None,
-    ) -> tuple[bytes, bytes | None]:
-        """Returns (asset_bytes, thumbnail_png_bytes). asset is a .glb or a .ply splat."""
+    ) -> tuple[bytes, bytes | None, dict]:
+        """Returns (asset_bytes, thumbnail_png_bytes, meta). asset is a .glb or a .ply splat.
+
+        TRELLIS.2's shape stage stochastically collapses to a flat plane for some (image, seed)
+        pairs. When the caller doesn't pin a seed we auto-retry with fresh random seeds (and
+        escalating sparse-structure guidance) until the mesh has real volume — so a flat
+        billboard never reaches the user. A pinned seed is respected verbatim (reproducible).
+        """
+        import random
         from PIL import Image
 
         img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-        outputs = self.pipeline.run(
-            img,
-            seed=seed if seed is not None else 0,
-            pipeline_type=_tier_to_pipeline_type(tier),
-        )
-        mesh = outputs[0]
+        ptype = _tier_to_pipeline_type(tier)
+        FLAT_MIN = 0.05  # extent_min/extent_max below this ≈ a plane
+
+        attempts_log = []
+        if seed is not None:
+            mesh, flat = self._run_once(img, ptype, seed, 7.5)
+            chosen_seed = seed
+            attempts_log.append({"seed": seed, "flatness": round(flat, 4)})
+        else:
+            best = None  # (flatness, mesh, seed)
+            s = random.randint(0, 2_147_483_647)
+            for i in range(4):
+                ss_guidance = 7.5 if i < 2 else 10.0  # push harder for structure on later tries
+                mesh, flat = self._run_once(img, ptype, s, ss_guidance)
+                attempts_log.append({"seed": s, "ss_guidance": ss_guidance, "flatness": round(flat, 4)})
+                if best is None or flat > best[0]:
+                    best = (flat, mesh, s)
+                if flat >= FLAT_MIN:
+                    break
+                s = random.randint(0, 2_147_483_647)
+            flat, mesh, chosen_seed = best
+        print("generate attempts:", attempts_log, "| chosen seed", chosen_seed, "flatness", round(flat, 4))
+        meta = {"seed": chosen_seed, "flatness": round(flat, 4), "attempts": attempts_log,
+                "flat_warning": flat < FLAT_MIN}
 
         if output_format == "splat":
-            asset_bytes = _synthesize_splat_ply(mesh)  # T-F7: synth-only, no native decoder
-        else:
-            asset_bytes = commercial_to_glb(
-                mesh.vertices, mesh.faces, mesh.attrs, mesh.coords, mesh.layout,
-                mesh.voxel_size, texture_size=texture_size, want_normal=want_normal,
-            )
-        thumb = _render_thumbnail(mesh)
-        return asset_bytes, thumb
+            return _synthesize_splat_ply(mesh), None, meta  # T-F7: synth-only, no native decoder
+        asset_bytes, dbg = commercial_to_glb(
+            mesh.vertices, mesh.faces, mesh.attrs, mesh.coords, mesh.layout,
+            mesh.voxel_size, texture_size=texture_size, want_normal=want_normal,
+            return_debug=True,
+        )
+        thumb = _render_validation(*dbg["_render"], size=512, nviews=1)  # hero thumbnail
+        return asset_bytes, thumb, meta
 
 
 # ---------------------------------------------------------------------------------------
@@ -302,7 +396,8 @@ class Trellis2Generator:
 # ---------------------------------------------------------------------------------------
 def commercial_to_glb(vertices, faces, attr_volume, coords, attr_layout, voxel_size,
                       *, texture_size: int = 2048, want_normal: bool = True,
-                      decimation_target: int = 1000000, return_debug: bool = False):
+                      decimation_target: int = 1000000, compress: bool = True,
+                      return_debug: bool = False):
     """Explicit-arg port of o_voxel.postprocess.to_glb; nvdiffrast swapped for PyTorch3D.
     Returns glb bytes, or (glb_bytes, debug_dict) when return_debug=True."""
     import numpy as np
@@ -348,7 +443,7 @@ def commercial_to_glb(vertices, faces, attr_volume, coords, attr_layout, voxel_s
     # Original (removed): dr.rasterize(ctx, uvs*2-1 as clip, faces) ; dr.interpolate(verts, rast, faces)
     # PyTorch3D equivalent: put UV*2-1 into a mesh's screen coords under an ortho camera.
     # !!! PHASE 2: validate this reproduces nvdiffrast coverage (esp. island edges) at 2K-4K.
-    pos, mask = _rasterize_uv_positions(out_vertices, out_faces, out_uvs, texture_size)
+    pos, mask, ptf, bary = _rasterize_uv_positions(out_vertices, out_faces, out_uvs, texture_size)
     valid_pos = pos[mask]
 
     # --- Drift correction: project texels onto the ORIGINAL hi-res mesh (unchanged) ---
@@ -378,14 +473,45 @@ def commercial_to_glb(vertices, faces, attr_volume, coords, attr_layout, voxel_s
     roughness = _chan("roughness", 1)[..., None]
     alpha = _chan("alpha", 1)[..., None]
 
+    # --- Normal map bake (T-F6): tangent-space, standard glTF/OpenGL (+V=green) convention ---
+    # Free from the existing BVH: sample ORIGINAL-mesh normals at each texel's projected point,
+    # express in the decimated mesh's tangent frame (Lengyel tangents from UVs). No explicit
+    # TANGENT export → relies on three.js's derivative tangents (same +U/+V convention).
+    # NOTE: correctness of the green-channel/handedness needs three.js validation in Phase 5.
+    normal_tex = None
+    if want_normal:
+        orig_vn = _vertex_normals(vertices, faces)                         # [Vorig,3]
+        n_orig = torch.nn.functional.normalize(
+            (orig_vn[faces[face_id.long()]] * uvw.unsqueeze(-1)).sum(1), dim=-1)  # [P,3]
+        vt, vb = _vertex_tangents(out_vertices, out_uvs, out_faces)        # per decimated vertex
+        of = out_faces.long()
+        b = bary[mask]; fid_d = ptf[mask].long()
+
+        def _interp(attr):
+            return (attr[of[fid_d]] * b.unsqueeze(-1)).sum(1)              # [P,3]
+        N_d = torch.nn.functional.normalize(_interp(out_normals), dim=-1)
+        T_i, B_i = _interp(vt), _interp(vb)
+        T = torch.nn.functional.normalize(T_i - N_d * (N_d * T_i).sum(-1, keepdim=True), dim=-1)
+        Bc = torch.cross(N_d, T, dim=-1)
+        sgn = torch.sign((Bc * B_i).sum(-1, keepdim=True)); sgn[sgn == 0] = 1.0
+        B = Bc * sgn
+        n_ts = torch.nn.functional.normalize(torch.stack(
+            [(n_orig * T).sum(-1), (n_orig * B).sum(-1), (n_orig * N_d).sum(-1)], dim=-1), dim=-1)
+        nmap = torch.full((texture_size, texture_size, 3), 0.0, device="cuda")
+        nmap[..., 2] = 1.0                                                 # flat = (0,0,1)
+        nmap[mask] = n_ts
+        normal_np = np.clip((nmap * 0.5 + 0.5).cpu().numpy() * 255, 0, 255).astype(np.uint8)
+        normal_np = cv2.inpaint(normal_np, mask_inv, 3, cv2.INPAINT_TELEA)  # gutter
+        normal_tex = Image.fromarray(normal_np)
+
     material = trimesh.visual.material.PBRMaterial(
         baseColorTexture=Image.fromarray(np.concatenate([base_color, alpha], axis=-1)),
         metallicRoughnessTexture=Image.fromarray(
             np.concatenate([np.zeros_like(metallic), roughness, metallic], axis=-1)
         ),
+        normalTexture=normal_tex,
         metallicFactor=1.0, roughnessFactor=1.0, alphaMode="OPAQUE", doubleSided=True,
     )
-    # TODO(phase3): normalTexture from bvh face_id+uvw on the ORIGINAL mesh normals (want_normal).
 
     v = out_vertices.cpu().numpy(); n = out_normals.cpu().numpy(); uv = out_uvs.cpu().numpy()
     v[:, 1], v[:, 2] = v[:, 2], -v[:, 1]           # glTF axis convention (unchanged)
@@ -395,17 +521,23 @@ def commercial_to_glb(vertices, faces, attr_volume, coords, attr_layout, voxel_s
         vertices=v, faces=out_faces.cpu().numpy(), vertex_normals=n, process=False,
         visual=trimesh.visual.TextureVisuals(uv=uv, material=material),
     )
-    glb = tmesh.export(file_type="glb")
-    # TODO(phase3): pipe through gltf-transform/gltfpack for Draco + KTX2 before returning.
+    glb_raw = tmesh.export(file_type="glb")
+    glb = _compress_glb(glb_raw) if compress else glb_raw
     if return_debug:
         base_rgba = np.concatenate([base_color, alpha], axis=-1)
         buf = io.BytesIO(); Image.fromarray(base_rgba).save(buf, "PNG")
+        nbuf = None
+        if normal_tex is not None:
+            nbuf = io.BytesIO(); normal_tex.save(nbuf, "PNG"); nbuf = nbuf.getvalue()
         debug = {
             "coverage": float(mask_np.mean()),
             "covered_texels": int(mask_np.sum()),
             "out_vertices": int(out_vertices.shape[0]),
             "out_faces": int(out_faces.shape[0]),
+            "glb_raw_bytes": len(glb_raw),
+            "glb_compressed_bytes": len(glb),
             "basecolor_png": buf.getvalue(),
+            "normal_png": nbuf,
             # for validation render (glTF axes, V-flipped uv — as exported):
             "_render": (v, out_faces.cpu().numpy(), uv, base_color),
         }
@@ -474,7 +606,57 @@ def _rasterize_uv_positions(vertices, faces, uvs, texture_size):
     fidx = pix_to_face[mask]
     tri = vertices[faces[fidx]]                     # (P,3,3)
     pos[mask] = (tri * bary[mask].unsqueeze(-1)).sum(dim=1)
-    return pos, mask
+    return pos, mask, pix_to_face, bary
+
+
+def _vertex_normals(v, faces):
+    """Area-weighted per-vertex normals, pure torch."""
+    import torch
+    f = faces.long()
+    fn = torch.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]], dim=-1)  # area-weighted
+    vn = torch.zeros_like(v)
+    for i in range(3):
+        vn.index_add_(0, f[:, i], fn)
+    return torch.nn.functional.normalize(vn, dim=-1)
+
+
+def _vertex_tangents(v, uv, faces):
+    """Lengyel per-vertex tangent (+U) and bitangent (+V) accumulators. Returns (vt, vb)."""
+    import torch
+    f = faces.long()
+    p0, p1, p2 = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+    u0, u1, u2 = uv[f[:, 0]], uv[f[:, 1]], uv[f[:, 2]]
+    e1, e2 = p1 - p0, p2 - p0
+    d1, d2 = u1 - u0, u2 - u0
+    denom = d1[:, 0] * d2[:, 1] - d2[:, 0] * d1[:, 1]
+    r = torch.where(denom.abs() < 1e-12, torch.zeros_like(denom), 1.0 / denom)[:, None]
+    T = (e1 * d2[:, 1:2] - e2 * d1[:, 1:2]) * r     # +U direction
+    Bt = (e2 * d1[:, 0:1] - e1 * d2[:, 0:1]) * r    # +V direction
+    vt, vb = torch.zeros_like(v), torch.zeros_like(v)
+    for i in range(3):
+        vt.index_add_(0, f[:, i], T)
+        vb.index_add_(0, f[:, i], Bt)
+    return vt, vb
+
+
+def _compress_glb(glb_bytes: bytes) -> bytes:
+    """gltfpack: meshopt geometry compression (-cc) + KTX2/basis textures (-tc). Returns the
+    compressed glb, or the original if gltfpack is unavailable/fails."""
+    import subprocess, tempfile, os, shutil
+    if shutil.which("gltfpack") is None:
+        print("gltfpack not found; returning uncompressed glb")
+        return glb_bytes
+    with tempfile.TemporaryDirectory() as d:
+        i, o = os.path.join(d, "in.glb"), os.path.join(d, "out.glb")
+        with open(i, "wb") as f:
+            f.write(glb_bytes)
+        r = subprocess.run(["gltfpack", "-i", i, "-o", o, "-cc", "-tc"],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(o):
+            print("gltfpack failed:", (r.stderr or r.stdout)[-500:])
+            return glb_bytes
+        with open(o, "rb") as f:
+            return f.read()
 
 
 def _render_validation(v, faces, uv, base_color, size=768, nviews=4) -> bytes:
@@ -534,35 +716,40 @@ def bake_from_dump(tier: str = "fast", texture_size: int = 2048) -> dict:
 
     glb, dbg = commercial_to_glb(
         vertices, faces, attr_volume, coords, attr_layout, voxel_size,
-        texture_size=texture_size, return_debug=True,
+        texture_size=texture_size, want_normal=True, compress=True, return_debug=True,
     )
     render_png = _render_validation(*dbg.pop("_render"))
 
-    with open(f"{CACHE_DIR}/phase2_{tier}_{texture_size}.glb", "wb") as f:
+    with open(f"{CACHE_DIR}/phase3_{tier}_{texture_size}.glb", "wb") as f:
         f.write(glb)
     weights_volume.commit()
     return {
-        "glb_bytes_len": len(glb),
         "coverage": dbg["coverage"],
         "covered_texels": dbg["covered_texels"],
         "out_vertices": dbg["out_vertices"],
         "out_faces": dbg["out_faces"],
+        "glb_raw_bytes": dbg["glb_raw_bytes"],
+        "glb_compressed_bytes": dbg["glb_compressed_bytes"],
         "basecolor_png": dbg["basecolor_png"],
+        "normal_png": dbg["normal_png"],
         "render_png": render_png,
         "glb": glb,
     }
 
 
 @app.local_entrypoint()
-def bake(tier: str = "fast", texture_size: int = 2048, outdir: str = "/tmp/trellis_phase2"):
+def bake(tier: str = "fast", texture_size: int = 2048, outdir: str = "/tmp/trellis_phase3"):
     import os, json
     os.makedirs(outdir, exist_ok=True)
     r = bake_from_dump.remote(tier=tier, texture_size=texture_size)
-    for k in ("basecolor_png", "render_png", "glb"):
+    for k in ("basecolor_png", "normal_png", "render_png", "glb"):
+        blob = r.pop(k)
+        if blob is None:
+            continue
         ext = "glb" if k == "glb" else "png"
         with open(f"{outdir}/{k}.{ext}", "wb") as f:
-            f.write(r.pop(k))
-    print("PHASE2_RESULT:", json.dumps(r, indent=2))
+            f.write(blob)
+    print("PHASE3_RESULT:", json.dumps(r, indent=2))
     print("artifacts in", outdir)
 
 
@@ -572,20 +759,15 @@ def _synthesize_splat_ply(mesh) -> bytes:
     raise NotImplementedError("Phase 3b: splat synthesis")
 
 
-def _render_thumbnail(mesh) -> bytes | None:
-    """PHASE 3: offscreen turntable/hero render via pyrender (EGL). Optional; None for now."""
-    return None
-
-
 @app.local_entrypoint()
 def main(image: str, tier: str = "balanced", texture_size: int = 2048,
          output_format: str = "glb", out: str = "out.glb", seed: int = -1):
     with open(image, "rb") as f:
         image_bytes = f.read()
-    asset, thumb = Trellis2Generator().generate.remote(
+    asset, thumb, meta = Trellis2Generator().generate.remote(
         image_bytes, tier=tier, texture_size=texture_size,
         output_format=output_format, seed=None if seed < 0 else seed,
     )
     with open(out, "wb") as f:
         f.write(asset)
-    print(f"wrote {out} ({len(asset)} bytes)")
+    print(f"wrote {out} ({len(asset)} bytes) | meta={meta}")

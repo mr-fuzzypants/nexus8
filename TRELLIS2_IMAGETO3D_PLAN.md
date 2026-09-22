@@ -257,14 +257,25 @@ in Phase 1** — the notes below reflect what actually works, not just the plan.
   autotune was fragile, T-P2). Offline-validated on the Phase-1 dump: coverage 0.46 @ 2048²,
   **flat-lit render shows correct UV alignment and NO visible island seams** (T-P4 → H2/H5).
   Wired into `generate()`. Full results in `SRED…` Part E.
-- **Phase 3 — Normal bake + compression + thumbnail (~1–2 d):** add the normal map from the
-  existing BVH `face_id`+`uvw` (no Embree — T-F6), Draco+KTX2, turntable thumbnail.
+- **✅ Phase 3 — Normal bake + compression + thumbnail (DONE, 2026-09-09):** tangent-space
+  **normal map** from the existing BVH (T-P5, no Embree); **meshopt+KTX2** compression via
+  gltfpack v0.22 (**Draco→meshopt** substitute, viewer-supported) — **67 MB → 10.9 MB (6.1×)**,
+  full PBR incl. normal (T-P6); PyTorch3D hero **thumbnail** (T-P7). Normal-map green/handedness
+  correctness deferred to Phase 5 (three.js). Results in `SRED…` Part F.
 - **Phase 3b — Gaussian-splat synthesis (M, ~1–2 d):** synthesize splats from surface points
   + albedo bake (no native decoder — T-F7); export `.ply`/`.splat` via gsplat. Tests T-H7.
-- **Phase 4 — Django dispatch/poll + ingest (N8, ~1–2 d):** endpoints, `3d_model` /
-  `gaussian_splat` storage, lineage, thumbnail ingest.
-- **Phase 5 — Frontend triggers + viewers (SPA, ~3–4 d):** AssetPanel action + standalone
-  panel (both formats); **new splat viewer adapter** wired into the adapter router.
+- **✅ Phase 4 — Django dispatch/poll + ingest (DONE, 2026-09-10):** `views_trellis.py`
+  (asset-scoped trigger/status + standalone upload) mirroring inpaint's spawn/poll;
+  `ingest_generated_asset` stores the GLB as a first-class `media_type='3d_model'` asset with the
+  Modal-rendered thumbnail + `init_image` lineage. Modal app **deployed**. E2E-validated: source
+  image #344 → 3d_model #345, lineage + thumbnail + idempotent re-poll (T-P8: cold start slow).
+  Results in `SRED…` Part G.
+- **◑ Phase 5 — Frontend trigger (mesh path DONE, 2026-09-10):** `library.ts`
+  `generateImageTo3D`/`imageTo3DStatus`; **AssetPanel "Generate 3D"** on image assets
+  (Fast/Balanced/Max) → dispatch → poll (`refetchInterval`) → new asset opens in the existing
+  Three.js viewer (no adapter change — `assetIs3DModel` already routes it). Type/lint-clean.
+  Results in `SRED…` Part H. **Deferred:** standalone panel + **splat viewer adapter** (with
+  Phase 3b); in-browser visual QA + normal-map correctness check.
 - **Phase 6 — Assessment (~1 d):** seam/quality/latency/cost across tiers and both output
   formats; record findings.
 

@@ -71,6 +71,12 @@ from .views_inpaint import MaskInpaintStatusView, MaskInpaintTriggerView
 from .views_scribble import ScribbleDraftView, ScribbleStatusView, ScribbleTriggerView
 from .views_erase import EraseImageStatusView, EraseImageTriggerView
 from .views_sketch_inpaint import SketchInpaintStatusView, SketchInpaintTriggerView
+from .views_trellis import (
+    ImageTo3DPendingView,
+    ImageTo3DStatusView,
+    ImageTo3DTriggerView,
+    ImageTo3DUploadView,
+)
 from .views_renders import LayerRenderGridView, LayerRenderSelectView, LayerSelectedRendersView
 from .views_workflow import WorkflowDetailView, WorkflowRegisterView
 from .views_runs import (
@@ -137,6 +143,10 @@ urlpatterns = [
     path('api/library/assets/<int:pk>/', LibraryAssetDetailView.as_view(), name='library-asset-detail'),
     path('api/library/assets/<int:pk>/mask/inpaint/', MaskInpaintTriggerView.as_view(), name='library-asset-mask-inpaint'),
     path('api/library/assets/<int:pk>/mask/inpaint/status/', MaskInpaintStatusView.as_view(), name='library-asset-mask-inpaint-status'),
+    path('api/library/assets/<int:pk>/image-to-3d/', ImageTo3DTriggerView.as_view(), name='library-asset-image-to-3d'),
+    path('api/library/assets/<int:pk>/image-to-3d/status/', ImageTo3DStatusView.as_view(), name='library-asset-image-to-3d-status'),
+    path('api/library/assets/<int:pk>/image-to-3d/pending/', ImageTo3DPendingView.as_view(), name='library-asset-image-to-3d-pending'),
+    path('api/library/image-to-3d/', ImageTo3DUploadView.as_view(), name='library-image-to-3d-upload'),
     path('api/library/assets/<int:pk>/scribble/', ScribbleTriggerView.as_view(), name='library-asset-scribble'),
     path('api/library/assets/<int:pk>/scribble/status/', ScribbleStatusView.as_view(), name='library-asset-scribble-status'),
     path('api/library/assets/<int:pk>/scribble/draft/', ScribbleDraftView.as_view(), name='library-asset-scribble-draft'),
